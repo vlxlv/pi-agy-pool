@@ -11,7 +11,7 @@ import {
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 import { type AgyEffort, AgyProcess } from "./agy-process.ts";
-import type { AgyEvent, AgyInitEvent } from "./agy-events.ts";
+import type { AgyEvent, AgyInitEvent, AgyStepUpdatePayload } from "./agy-events.ts";
 import type { spawn } from "node:child_process";
 
 // ponytail: in-memory conversation map per process, external persistence/daemon handled by agy-pool-go
@@ -302,7 +302,7 @@ export function streamSimple(
             void options.onResponse({ status: 200, headers: {} }, model);
           }
         } else if (event.event === "step_update") {
-          const update = (event as { step_update?: Record<string, unknown> }).step_update;
+          const update = (event as { step_update?: AgyStepUpdatePayload }).step_update;
           if (!update) return;
 
           if (!startedEmitted) {
@@ -310,7 +310,23 @@ export function streamSimple(
             stream.push({ type: "start", partial: output });
           }
 
-          const textDelta = typeof update.text_delta === "string" ? update.text_delta : undefined;
+          // Invariant: Only step_type == "agent_response" (or legacy untyped response) with text_delta contributes to assistant answer text.
+          // Tool, subagent, system_message, and unknown telemetry events must NEVER contribute text or emit tool calls.
+          const stepType = update.step_type;
+          const isNonAgentStep =
+            stepType === "tool" ||
+            stepType === "subagent" ||
+            stepType === "system_message" ||
+            stepType === "user_input";
+
+          const isAgentResponse =
+            stepType === "agent_response" || (!stepType && !isNonAgentStep);
+
+          const textDelta =
+            isAgentResponse && typeof update.text_delta === "string" && update.text_delta.length > 0
+              ? update.text_delta
+              : undefined;
+
           if (textDelta) {
             if (output.content.length === 0) {
               output.content.push({ type: "text", text: "" });
@@ -325,7 +341,7 @@ export function streamSimple(
             });
           }
 
-          const usage = update.usage as Record<string, unknown> | undefined;
+          const usage = update.usage;
           if (usage) {
             if (typeof usage.input_tokens === "number") {
               output.usage.input = usage.input_tokens;
@@ -345,6 +361,28 @@ export function streamSimple(
 
       // Execute the turn
       const result = await proc.runTurn(prompt, handleEvent, options?.signal);
+
+      // Fallback: If no streaming deltas were received, populate from terminal result response
+      let fallbackResponse: string | undefined;
+      if (typeof result.result?.response === "string" && result.result.response) {
+        fallbackResponse = result.result.response;
+      } else if (
+        typeof (result as Record<string, unknown>).response === "string" &&
+        (result as Record<string, unknown>).response
+      ) {
+        fallbackResponse = (result as Record<string, unknown>).response as string;
+      }
+
+      if (output.content.length === 0 && fallbackResponse) {
+        output.content.push({ type: "text", text: fallbackResponse });
+        stream.push({ type: "text_start", contentIndex: 0, partial: output });
+        stream.push({
+          type: "text_delta",
+          contentIndex: 0,
+          delta: fallbackResponse,
+          partial: output,
+        });
+      }
 
       // Terminal usage fallback from result event if not already populated or if provided authoritatively
       const finalUsage =

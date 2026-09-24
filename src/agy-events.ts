@@ -8,20 +8,61 @@ export interface AgyInitEvent {
   [key: string]: unknown;
 }
 
+export type AgyStepType =
+  | "agent_response"
+  | "tool"
+  | "subagent"
+  | "system_message"
+  | "user_input"
+  | (string & {});
+
+export type AgyStepState = "ACTIVE" | "DONE" | "RUNNING" | (string & {});
+
+export interface AgyToolInfo {
+  name?: string;
+  parameters?: Record<string, unknown>;
+  output?: string;
+  [key: string]: unknown;
+}
+
+export interface AgySubagentItem {
+  type_name?: string;
+  role?: string;
+  initial_prompt?: string;
+  conversation_id?: string;
+  log_uri?: string;
+  [key: string]: unknown;
+}
+
+export interface AgySubagentInfo {
+  subagents?: AgySubagentItem[];
+  [key: string]: unknown;
+}
+
 export interface AgyStepUpdateUsage {
   input_tokens?: number;
   output_tokens?: number;
   total_tokens?: number;
   thinking_tokens?: number;
+  cache_read_tokens?: number;
   [key: string]: unknown;
 }
 
 export interface AgyStepUpdatePayload {
+  step_index?: number;
+  step_type?: AgyStepType;
+  state?: AgyStepState;
+  conversation_id?: string;
+  text_delta?: string;
+  tool_name?: string;
+  tool_info?: AgyToolInfo;
+  subagent_info?: AgySubagentInfo;
+  duration_seconds?: number;
+  usage?: AgyStepUpdateUsage;
+  // Legacy / fallback fields
   role?: string;
   content?: string;
   status?: "RUNNING" | "DONE" | string;
-  text_delta?: string;
-  usage?: AgyStepUpdateUsage;
   [key: string]: unknown;
 }
 
