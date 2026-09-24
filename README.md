@@ -54,10 +54,10 @@ Output will show the registered `agy-pool` model family:
 
 ```text
 provider  model                     context  max-out  thinking  images
-agy-pool  gemini-3.8-flash          1.0M     65.5K    no        no
-agy-pool  gemini-3.7-flash          1.0M     65.5K    no        no
-agy-pool  gemini-3.6-flash          1.0M     65.5K    no        no
-agy-pool  gemini-3.1-pro            1.0M     65.5K    no        no
+agy-pool  gemini-3.8-flash          1.0M     65.5K    yes       no
+agy-pool  gemini-3.7-flash          1.0M     65.5K    yes       no
+agy-pool  gemini-3.6-flash          1.0M     65.5K    yes       no
+agy-pool  gemini-3.1-pro            1.0M     65.5K    yes       no
 agy-pool  claude-sonnet-4-6         250K     64K      no        no
 agy-pool  claude-opus-4-6-thinking  250K     64K      no        no
 agy-pool  gpt-oss-120b-medium       131.1K   32.8K    no        no
@@ -102,21 +102,35 @@ pi --model agy-pool/gemini-3.8-flash -p "Explain quantum computing in one senten
 pi --model agy-pool/gemini-3.8-flash
 ```
 
+### Thinking Level Selection
+
+`pi-agy-pool` supports Pi's thinking level controls, mapping them directly to official AGY's `--effort` flag:
+
+```bash
+# Via --thinking flag
+pi --model agy-pool/gemini-3.8-flash --thinking low -p "Explain quantum computing"
+pi --model agy-pool/gemini-3.8-flash --thinking high -p "Write an optimal sorting algorithm"
+
+# Via model pattern suffix shorthand
+pi --model agy-pool/gemini-3.8-flash:high -p "Plan migration strategy"
+pi --model agy-pool/gemini-3.1-pro:low -p "Summarize diff"
+```
+
 ---
 
-## Supported Models (Native Switch Model Parity)
+## Supported Models & Thinking Capability Matrix
 
 `pi-agy-pool` exposes the 7 canonical models matching native Antigravity:
 
-| Model ID | Display Name | Native AGY Family | Context Window | Max Output | Effort Support |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `gemini-3.8-flash` | Gemini 3.8 Flash | Google Gemini | 1,048,576 | 65,536 | low, medium (default), high |
-| `gemini-3.7-flash` | Gemini 3.7 Flash | Google Gemini | 1,048,576 | 65,536 | low, medium (default), high |
-| `gemini-3.6-flash` | Gemini 3.6 Flash | Google Gemini | 1,048,576 | 65,536 | low, medium (default), high |
-| `gemini-3.1-pro` | Gemini 3.1 Pro | Google Gemini | 1,048,576 | 65,535 | low, high (default) |
-| `claude-sonnet-4-6` | Claude Sonnet 4.6 (Thinking) | Anthropic (Vertex) | 250,000 | 64,000 | native thinking (omits --effort) |
-| `claude-opus-4-6-thinking` | Claude Opus 4.6 (Thinking) | Anthropic (Vertex) | 250,000 | 64,000 | native thinking (omits --effort) |
-| `gpt-oss-120b-medium` | GPT-OSS 120B (Medium) | OpenAI (Vertex) | 131,072 | 32,768 | optional (medium) |
+| Model ID | Display Name | Thinking (`pi --list-models`) | Supported Effort | AGY `--effort` Mapping |
+| :--- | :--- | :--- | :--- | :--- |
+| `gemini-3.8-flash` | Gemini 3.8 Flash | `yes` | `low`, `medium`, `high` | `--effort low\|medium\|high` (default: `medium`) |
+| `gemini-3.7-flash` | Gemini 3.7 Flash | `yes` | `low`, `medium`, `high` | `--effort low\|medium\|high` (default: `medium`) |
+| `gemini-3.6-flash` | Gemini 3.6 Flash | `yes` | `low`, `medium`, `high` | `--effort low\|medium\|high` (default: `medium`) |
+| `gemini-3.1-pro` | Gemini 3.1 Pro | `yes` | `low`, `high` | `--effort low\|high` (default: `high`) |
+| `claude-sonnet-4-6` | Claude Sonnet 4.6 (Thinking) | `no` | native thinking | Omitted (do NOT pass `--effort`) |
+| `claude-opus-4-6-thinking` | Claude Opus 4.6 (Thinking) | `no` | native thinking | Omitted (do NOT pass `--effort`) |
+| `gpt-oss-120b-medium` | GPT-OSS 120B (Medium) | `no` | N/A | Omitted (do NOT pass `--effort`) |
 
 ---
 

@@ -335,19 +335,60 @@ describe("stream.ts: streamSimple", () => {
     assert.strictEqual(id, "conv-xyz-789");
   });
 
-  it("resolveEffort respects official AGY model constraints", () => {
-    // Claude models: must omit --effort
-    assert.strictEqual(resolveEffort("claude-sonnet-4-6"), undefined);
-    assert.strictEqual(resolveEffort("claude-opus-4-6-thinking"), undefined);
+  it("resolveEffort respects official AGY model constraints and maps thinking levels", () => {
+    const savedEnv = process.env.AGY_POOL_EFFORT;
+    try {
+      delete process.env.AGY_POOL_EFFORT;
 
-    // Gemini 3.1 Pro: defaults to high, supports low
-    assert.strictEqual(resolveEffort("gemini-3.1-pro"), "high");
-    assert.strictEqual(resolveEffort("gemini-3.1-pro", { reasoning: "low" }), "low");
+      // Non-Gemini models: must NEVER receive --effort, even if reasoning or env is specified
+      const nonGemini = ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium"];
+      for (const modelId of nonGemini) {
+        assert.strictEqual(resolveEffort(modelId), undefined);
+        assert.strictEqual(resolveEffort(modelId, { reasoning: "low" }), undefined);
+        assert.strictEqual(resolveEffort(modelId, { reasoning: "high" }), undefined);
+      }
 
-    // Gemini Flash: defaults to medium, maps reasoning levels
-    assert.strictEqual(resolveEffort("gemini-3.8-flash"), "medium");
-    assert.strictEqual(resolveEffort("gemini-3.8-flash", { reasoning: "high" }), "high");
-    assert.strictEqual(resolveEffort("gemini-3.7-flash", { reasoning: "low" }), "low");
+      // Gemini 3.1 Pro: defaults to high, supports low and high
+      assert.strictEqual(resolveEffort("gemini-3.1-pro"), "high");
+      assert.strictEqual(resolveEffort("gemini-3.1-pro", { reasoning: "low" }), "low");
+      assert.strictEqual(resolveEffort("gemini-3.1-pro", { reasoning: "minimal" }), "low");
+      assert.strictEqual(resolveEffort("gemini-3.1-pro", { reasoning: "medium" }), "high"); // medium unsupported -> high
+      assert.strictEqual(resolveEffort("gemini-3.1-pro", { reasoning: "high" }), "high");
+      assert.strictEqual(resolveEffort("gemini-3.1-pro", { reasoning: "xhigh" }), "high");
+      assert.strictEqual(resolveEffort("gemini-3.1-pro", { reasoning: "max" }), "high");
+
+      // Gemini Flash models: default to medium, support low/medium/high
+      const flashModels = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"];
+      for (const flashId of flashModels) {
+        assert.strictEqual(resolveEffort(flashId), "medium");
+        assert.strictEqual(resolveEffort(flashId, { reasoning: "minimal" }), "low");
+        assert.strictEqual(resolveEffort(flashId, { reasoning: "low" }), "low");
+        assert.strictEqual(resolveEffort(flashId, { reasoning: "medium" }), "medium");
+        assert.strictEqual(resolveEffort(flashId, { reasoning: "high" }), "high");
+        assert.strictEqual(resolveEffort(flashId, { reasoning: "xhigh" }), "high");
+        assert.strictEqual(resolveEffort(flashId, { reasoning: "max" }), "high");
+      }
+
+      // Precedence: caller options override AGY_POOL_EFFORT
+      process.env.AGY_POOL_EFFORT = "low";
+      assert.strictEqual(resolveEffort("gemini-3.8-flash", { reasoning: "high" }), "high");
+      assert.strictEqual(resolveEffort("gemini-3.8-flash"), "low");
+      // GPT-OSS remains undefined even when AGY_POOL_EFFORT is set
+      assert.strictEqual(resolveEffort("gpt-oss-120b-medium"), undefined);
+
+      // Gemini 3.1 Pro with AGY_POOL_EFFORT
+      process.env.AGY_POOL_EFFORT = "medium";
+      // medium is invalid on 3.1 Pro, falls back to high
+      assert.strictEqual(resolveEffort("gemini-3.1-pro"), "high");
+      process.env.AGY_POOL_EFFORT = "low";
+      assert.strictEqual(resolveEffort("gemini-3.1-pro"), "low");
+    } finally {
+      if (savedEnv !== undefined) {
+        process.env.AGY_POOL_EFFORT = savedEnv;
+      } else {
+        delete process.env.AGY_POOL_EFFORT;
+      }
+    }
   });
 
   it("session isolation: unrelated Pi sessions do not share processes", async () => {

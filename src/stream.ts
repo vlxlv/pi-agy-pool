@@ -137,7 +137,7 @@ export function buildTurnPrompt(
 /**
  * Resolve reasoning effort flag from model, options, or environment.
  * Official AGY constraints:
- * - Claude models: --effort not supported (must be omitted)
+ * - Claude models & GPT-OSS: --effort not supported (must be omitted)
  * - Gemini 3.1 Pro: supports "low" and "high" (default: "high")
  * - Gemini Flash models (3.8, 3.7, 3.6): requires --effort (low, medium, high; default: "medium")
  */
@@ -145,21 +145,33 @@ export function resolveEffort(
   modelId: string,
   options?: SimpleStreamOptions,
 ): AgyEffort | undefined {
-  if (modelId.startsWith("claude-")) {
+  if (!modelId.startsWith("gemini-")) {
     return undefined;
   }
 
+  const envVal = process.env.AGY_POOL_EFFORT?.toLowerCase();
+
   if (modelId === "gemini-3.1-pro") {
-    if (options?.reasoning === "low" || options?.reasoning === "minimal") {
-      return "low";
+    if (options?.reasoning) {
+      if (options.reasoning === "low" || options.reasoning === "minimal") {
+        return "low";
+      }
+      if (
+        options.reasoning === "medium" ||
+        options.reasoning === "high" ||
+        options.reasoning === "xhigh" ||
+        options.reasoning === "max"
+      ) {
+        return "high";
+      }
+    }
+    if (envVal === "low" || envVal === "high") {
+      return envVal;
     }
     return "high";
   }
 
-  const envVal = process.env.AGY_POOL_EFFORT?.toLowerCase();
-  if (envVal === "low" || envVal === "medium" || envVal === "high") {
-    return envVal;
-  }
+  // Gemini Flash models (gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, etc.)
   if (options?.reasoning) {
     switch (options.reasoning) {
       case "minimal":
@@ -174,11 +186,11 @@ export function resolveEffort(
     }
   }
 
-  if (modelId.startsWith("gemini-")) {
-    return "medium";
+  if (envVal === "low" || envVal === "medium" || envVal === "high") {
+    return envVal;
   }
 
-  return undefined;
+  return "medium";
 }
 
 export interface ExtendedStreamOptions extends SimpleStreamOptions {

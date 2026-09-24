@@ -165,4 +165,166 @@ describe("provider.ts: Pi real provider integration", () => {
     assert.strictEqual(killed, true, "Process must be killed on session_shutdown");
     assert.strictEqual(activeProcesses.size, 0, "activeProcesses must be cleared");
   });
+
+  it("real Pi composeModelProvider correctly propagates reasoning and thinkingLevelMap", async () => {
+    let registeredConfig: any = null;
+    const mockPi: Partial<ExtensionAPI> = {
+      registerProvider: (((_name: string, config: any) => {
+        registeredConfig = config;
+      }) as unknown) as ExtensionAPI["registerProvider"],
+      on: (((_event: string, _handler: any) => () => {}) as unknown) as ExtensionAPI["on"],
+    };
+
+    registerAgyPoolProvider(mockPi as ExtensionAPI);
+
+    const composerPath = path.resolve(
+      import.meta.dirname,
+      "../node_modules/@earendil-works/pi-coding-agent/dist/core/provider-composer.js",
+    );
+    const { composeModelProvider } = await import("file://" + composerPath);
+
+    const composed = composeModelProvider(
+      "agy-pool",
+      undefined,
+      {
+        getProviderIds: () => [],
+        getProvider: () => null,
+        getError: () => null,
+      },
+      registeredConfig,
+    );
+
+    const models = composed.getModels();
+    const flash38 = models.find((m: any) => m.id === "gemini-3.8-flash");
+    assert.ok(flash38);
+    assert.strictEqual(flash38.reasoning, true);
+    assert.deepStrictEqual(flash38.thinkingLevelMap, {
+      off: null,
+      minimal: null,
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: null,
+      max: null,
+    });
+
+    const pro31 = models.find((m: any) => m.id === "gemini-3.1-pro");
+    assert.ok(pro31);
+    assert.strictEqual(pro31.reasoning, true);
+    assert.deepStrictEqual(pro31.thinkingLevelMap, {
+      off: null,
+      minimal: null,
+      medium: null,
+      low: "low",
+      high: "high",
+      xhigh: null,
+      max: null,
+    });
+
+    const sonnet = models.find((m: any) => m.id === "claude-sonnet-4-6");
+    assert.ok(sonnet);
+    assert.strictEqual(sonnet.reasoning, false);
+    assert.strictEqual(sonnet.thinkingLevelMap, undefined);
+
+    const gpt = models.find((m: any) => m.id === "gpt-oss-120b-medium");
+    assert.ok(gpt);
+    assert.strictEqual(gpt.reasoning, false);
+    assert.strictEqual(gpt.thinkingLevelMap, undefined);
+  });
+
+  it("real Pi composed provider streamSimple maps thinking levels to AGY --effort arguments", async () => {
+    resetActiveProcesses();
+    const { PassThrough } = await import("node:stream");
+    const { EventEmitter } = await import("node:events");
+
+    let registeredConfig: any = null;
+    const mockPi: Partial<ExtensionAPI> = {
+      registerProvider: (((_name: string, config: any) => {
+        registeredConfig = config;
+      }) as unknown) as ExtensionAPI["registerProvider"],
+      on: (((_event: string, _handler: any) => () => {}) as unknown) as ExtensionAPI["on"],
+    };
+
+    registerAgyPoolProvider(mockPi as ExtensionAPI);
+
+    const composerPath = path.resolve(
+      import.meta.dirname,
+      "../node_modules/@earendil-works/pi-coding-agent/dist/core/provider-composer.js",
+    );
+    const { composeModelProvider } = await import("file://" + composerPath);
+
+    const composed = composeModelProvider(
+      "agy-pool",
+      undefined,
+      {
+        getProviderIds: () => [],
+        getProvider: () => null,
+        getError: () => null,
+      },
+      registeredConfig,
+    );
+
+    const models = composed.getModels();
+    const flashModel = models.find((m: any) => m.id === "gemini-3.8-flash");
+    const proModel = models.find((m: any) => m.id === "gemini-3.1-pro");
+    const claudeModel = models.find((m: any) => m.id === "claude-sonnet-4-6");
+    const gptModel = models.find((m: any) => m.id === "gpt-oss-120b-medium");
+
+    const testEffort = async (model: any, reasoning: any, expectedEffort: string | undefined) => {
+      resetActiveProcesses();
+      let spawnedArgs: string[] = [];
+      const childEmitter = new EventEmitter() as any;
+      childEmitter.stdin = new PassThrough();
+      childEmitter.stdout = new PassThrough();
+      childEmitter.stderr = new PassThrough();
+      childEmitter.killed = false;
+      childEmitter.kill = () => {
+        childEmitter.killed = true;
+        return true;
+      };
+
+      const spawnFn = ((_bin: string, args: string[]) => {
+        spawnedArgs = args;
+        return childEmitter;
+      }) as any;
+
+      const stream = composed.streamSimple(
+        model,
+        { messages: [{ role: "user", content: "Hi", timestamp: 1 }] } as any,
+        { reasoning, spawnFn },
+      );
+
+      childEmitter.stdout.write('{"event":"init","conversation_id":"c-test"}\n');
+      childEmitter.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+      await stream.result();
+
+      if (expectedEffort !== undefined) {
+        assert.ok(spawnedArgs.includes("--effort"), `Expected --effort in spawned args: ${spawnedArgs}`);
+        const effortIdx = spawnedArgs.indexOf("--effort");
+        assert.strictEqual(spawnedArgs[effortIdx + 1], expectedEffort);
+      } else {
+        assert.strictEqual(
+          spawnedArgs.includes("--effort"),
+          false,
+          `Expected NO --effort for ${model.id} but found in: ${spawnedArgs}`,
+        );
+      }
+    };
+
+    // Gemini Flash: low, medium, high
+    await testEffort(flashModel, "low", "low");
+    await testEffort(flashModel, "medium", "medium");
+    await testEffort(flashModel, "high", "high");
+
+    // Gemini 3.1 Pro: low, high (medium -> high)
+    await testEffort(proModel, "low", "low");
+    await testEffort(proModel, "high", "high");
+    await testEffort(proModel, "medium", "high");
+
+    // Claude and GPT-OSS: must NOT receive --effort even if reasoning is passed
+    await testEffort(claudeModel, "high", undefined);
+    await testEffort(gptModel, "high", undefined);
+
+    resetActiveProcesses();
+  });
 });

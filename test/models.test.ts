@@ -34,11 +34,12 @@ describe("models.ts: catalog verification", () => {
     );
   });
 
-  it("every exposed model has required Pi metadata", () => {
+  it("every exposed model has required Pi metadata and correct reasoning capabilities", () => {
+    const geminiFlashIds = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"];
+
     for (const model of MODELS) {
       assert.ok(typeof model.id === "string" && model.id.length > 0, `Model missing id`);
       assert.ok(typeof model.name === "string" && model.name.length > 0, `${model.id} missing name`);
-      assert.strictEqual(model.reasoning, false, `${model.id} reasoning must be false`);
       assert.deepStrictEqual(model.input, ["text"], `${model.id} input must be text only`);
       assert.ok(model.cost, `${model.id} missing cost`);
       assert.strictEqual(model.cost.input, 0);
@@ -53,6 +54,38 @@ describe("models.ts: catalog verification", () => {
         typeof model.maxTokens === "number" && model.maxTokens > 0,
         `${model.id} invalid maxTokens`,
       );
+
+      // Reasoning capability matrix
+      if (geminiFlashIds.includes(model.id)) {
+        assert.strictEqual(model.reasoning, true, `${model.id} must support reasoning`);
+        assert.deepStrictEqual(model.thinkingLevelMap, {
+          off: null,
+          minimal: null,
+          low: "low",
+          medium: "medium",
+          high: "high",
+          xhigh: null,
+          max: null,
+        });
+      } else if (model.id === "gemini-3.1-pro") {
+        assert.strictEqual(model.reasoning, true, `${model.id} must support reasoning`);
+        assert.deepStrictEqual(model.thinkingLevelMap, {
+          off: null,
+          minimal: null,
+          medium: null,
+          low: "low",
+          high: "high",
+          xhigh: null,
+          max: null,
+        });
+      } else {
+        assert.strictEqual(
+          model.reasoning,
+          false,
+          `${model.id} must not support reasoning (--effort unsupported in AGY)`,
+        );
+        assert.strictEqual(model.thinkingLevelMap, undefined);
+      }
     }
   });
 
