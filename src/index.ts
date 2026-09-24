@@ -10,6 +10,6 @@ export default function (pi: ExtensionAPI): void {
 
 export * from "./models.ts";
 export * from "./provider.ts";
-export * from "./request.ts";
-export * from "./sse.ts";
+export * from "./agy-events.ts";
+export * from "./agy-process.ts";
 export * from "./stream.ts";

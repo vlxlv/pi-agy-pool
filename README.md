@@ -1,8 +1,8 @@
 # pi-agy-pool
 
-`pi-agy-pool` is a minimal, lightweight model-provider extension for [Pi](https://github.com/earendil-works/pi) that connects Pi to an upstream [`agy-pool-go`](https://github.com/vlxlv/agy-pool-go) gateway for Cloud Code PA streaming generation.
+`pi-agy-pool` is an official AGY stream-transport model-provider extension for [Pi](https://github.com/earendil-works/pi) that routes model generation through [`agy-pool-go`](https://github.com/vlxlv/agy-pool-go) and official Antigravity headless.
 
-> **Important:** `pi-agy-pool` does **not** manage Google accounts, OAuth tokens, authentication, quota, or failovers. All account management and authentication belong strictly to `agy-pool-go`.
+> **Important:** `pi-agy-pool` does **not** manage Google accounts, OAuth tokens, authentication, quota, or failovers. All account management and scheduling belong strictly to `agy-pool-go`.
 
 ---
 
@@ -12,12 +12,16 @@
 Pi
  ↓
 pi-agy-pool (extension)
- ↓ HTTP/SSE (POST /v1internal:streamGenerateContent?alt=sse)
-127.0.0.1:8899 (default gateway)
+ ↓ subprocess spawn (argument array)
+agy-pool run -- <native AGY stream-json args>
  ↓
-agy-pool-go
+official agy-native
+ ↓ CLOUD_CODE_URL configured by agy-pool-go
+agy-pool-go local gateway (:8899)
  ↓
-Cloud Code PA
+existing multi-account scheduler / OAuth / quota / failover
+ ↓
+Google
 ```
 
 ---
@@ -25,13 +29,14 @@ Cloud Code PA
 ## Prerequisites
 
 - **Pi CLI** (`pi`) installed and available in `PATH`.
-- A running **`agy-pool-go`** daemon listening locally (default: `127.0.0.1:8899`).
+- **`agy-pool`** binary installed and available in `PATH` (or configured via `AGY_POOL_BIN`).
+- A running **`agy-pool-go`** daemon.
 
 ---
 
 ## Installation into Pi
 
-You can load `pi-agy-pool` directly when launching Pi:
+Load `pi-agy-pool` directly when launching Pi:
 
 ```bash
 pi -e /path/to/pi-agy-pool/src/index.ts
@@ -47,97 +52,57 @@ pi -e ./src/index.ts --list-models | grep agy-pool
 
 ---
 
+## Supported Models (Native Switch Model Parity)
+
+`pi-agy-pool` V0.2 exposes the 7 canonical models matching the native Antigravity Switch Model catalog:
+
+| Model ID | Display Name | Native AGY Family | Context Window | Max Output | Effort Support |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `gemini-3.8-flash` | Gemini 3.8 Flash | Google Gemini | 1,048,576 | 65,536 | low, medium (default), high |
+| `gemini-3.7-flash` | Gemini 3.7 Flash | Google Gemini | 1,048,576 | 65,536 | low, medium (default), high |
+| `gemini-3.6-flash` | Gemini 3.6 Flash | Google Gemini | 1,048,576 | 65,536 | low, medium (default), high |
+| `gemini-3.1-pro` | Gemini 3.1 Pro | Google Gemini | 1,048,576 | 65,535 | low, high (default) |
+| `claude-sonnet-4-6` | Claude Sonnet 4.6 (Thinking) | Anthropic (Vertex) | 250,000 | 64,000 | native thinking (omits --effort) |
+| `claude-opus-4-6-thinking` | Claude Opus 4.6 (Thinking) | Anthropic (Vertex) | 250,000 | 64,000 | native thinking (omits --effort) |
+| `gpt-oss-120b-medium` | GPT-OSS 120B (Medium) | OpenAI (Vertex) | 131,072 | 32,768 | optional (medium) |
+
+---
+
 ## Configuration
 
-`pi-agy-pool` defaults to connecting to `127.0.0.1:8899`.
-
-You can override the gateway base URL via the `AGY_POOL_BASE_URL` environment variable:
-
-```bash
-export AGY_POOL_BASE_URL="http://127.0.0.1:8899"
-```
-
-No Google API keys or credentials should be set in `pi-agy-pool`. Upstream authentication is handled by `agy-pool-go`.
+| Environment Variable | Description | Default |
+| :--- | :--- | :--- |
+| `AGY_POOL_BIN` | Path or command name for the `agy-pool` CLI | `agy-pool` |
+| `AGY_POOL_EFFORT` | Reasoning effort override (`low`, `medium`, `high`) | Model-specific native default |
 
 ---
 
-## Supported Models (V0.1.1 Curated Catalog)
+## V0.2 Transport Features
 
-`pi-agy-pool` V0.1.1 provides a curated static model catalog verified against Cloud Code PA via `agy-pool-go`.
-
-### Models Exposed by pi-agy-pool
-
-| Model ID | Display Name | Family | Context Window | Max Output | Status |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `gemini-3.6-flash-high` | Gemini 3.6 Flash (High) | Google Gemini | 1,048,576 | 65,536 | Recommended (Default) |
-| `gemini-3.6-flash-medium` | Gemini 3.6 Flash (Medium) | Google Gemini | 1,048,576 | 65,536 | Verified |
-| `gemini-3.6-flash-low` | Gemini 3.6 Flash (Low) | Google Gemini | 1,048,576 | 65,536 | Verified |
-| `gemini-pro-agent` | Gemini 3.1 Pro (High) | Google Gemini | 1,048,576 | 65,535 | Recommended Pro |
-| `gemini-3.1-pro-low` | Gemini 3.1 Pro (Low) | Google Gemini | 1,048,576 | 65,535 | Verified Pro |
-| `gemini-3.5-flash-lite` | Gemini 3.5 Flash Lite | Google Gemini | 1,048,576 | 65,535 | Verified Utility |
-| `gemini-3-flash` | Gemini 3 Flash | Google Gemini | 1,048,576 | 65,536 | Verified Fast |
-| `claude-sonnet-4-6` | Claude Sonnet 4.6 | Anthropic (Vertex) | 250,000 | 64,000 | Verified |
-| `claude-opus-4-6-thinking` | Claude Opus 4.6 | Anthropic (Vertex) | 250,000 | 64,000 | Verified |
-| `gpt-oss-120b-medium` | GPT-OSS 120B (Medium) | OpenAI (Vertex) | 131,072 | 32,768 | Verified |
-| `gemini-2.5-flash` | Gemini 2.5 Flash | Google Gemini | 1,048,576 | 65,535 | Legacy Alias |
-
-### Static Catalog vs. Upstream Availability
-
-- **Curated Static Catalog:** V0.1.1 uses a static model catalog in [`src/models.ts`](file:///home/codex/work/pi-agy-pool/src/models.ts). It does not dynamically query upstream on every request.
-- **Dynamic Upstream Models:** Cloud Code PA dynamically discovers 27 internal/specialized identifiers via `POST /v1internal:fetchAvailableModels`. Non-generative, internal routing tiers (e.g. `gemini-3.8-flash-tiered`), deprecated entries (e.g. `gemini-3.1-pro-high`), and capacity-exhausted legacy models (e.g. `gemini-2.5-pro`) are intentionally excluded from the active Pi model picker.
-- **Pi Custom IDs:** Pi allows passing custom model IDs directly via `--model agy-pool/<MODEL_ID>` if you wish to experiment with unlisted models supported by your upstream backend.
-
----
-
-## Supported V0.1.1 Features
-
-- Pi extension loading and provider registration via `pi.registerProvider("agy-pool", ...)`
-- Updated V0.1.1 curated model catalog matching native Antigravity recommended models
-- Text-only conversations with streaming output
-- User and assistant conversation history mapping (`assistant` → `model`, `user` → `user`)
-- System prompt mapping (`systemInstruction`)
-- Centralized model definitions in [`src/models.ts`](file:///home/codex/work/pi-agy-pool/src/models.ts)
-- Cloud Code PA request formatting (`/v1internal:streamGenerateContent?alt=sse`)
-- Incremental Server-Sent Events (SSE) parsing handling split chunks, CRLF framing, and partial UTF-8 boundaries
-- Incremental `text_delta` streaming events
-- Token usage metadata reporting (`promptTokenCount`, `candidatesTokenCount`, `totalTokenCount`, `thoughtsTokenCount`)
-- Direct HTTP error and transport error reporting without retry/failover
-- `AbortSignal` cancellation support
-
----
-
-## Explicit V0.1.1 Limitations
-
-The V0.1.1 release is intentionally scoped as a minimal maintenance update:
-
-- **No tool / function calling:** `functionCall` and `functionResponse` are not implemented.
-- **No thought/reasoning UI:** `thought == true` parts and `thoughtSignature` are ignored (V0.1.1 remains text-only).
-- **No MCP support.**
-- **No account / quota management:** Handled entirely by `agy-pool-go`.
-- **No runtime model discovery:** Model catalog is statically curated to keep generation requests fast and deterministic.
-- **No native `agy` process spawning.**
-- **No retries:** Requests are sent once; failure reporting is immediate and deterministic.
+- **Official AGY Subprocess Transport:** Spawns `agy-pool run --` with argument arrays (no `shell: true`, safe against command injection).
+- **Session Continuity:** Captures `init.conversation_id` from AGY and passes `--conversation <id>` for resilient multi-turn conversation resumption across process restarts.
+- **Process Isolation:** One Pi session owns one dedicated AGY child process. Multi-turn interactions run through the same process's `stdin`.
+- **Cancellation & Cleanup:** `AbortSignal` immediately sends `SIGINT` to child processes, awaits clean exit, and permanently discards cancelled processes from reuse.
+- **Structured NDJSON Output:** Robust incremental parsing of `stream-json` stdout events (`init`, `step_update`, `result`), handling chunk fragmentation and UTF-8 multibyte boundaries. Diagnostics stay on `stderr`.
+- **Offline Tests:** 100% offline unit test suite with mock child process transports.
 
 ---
 
 ## Usage Example
 
-Run a prompt through the registered provider using `gemini-3.6-flash-high`:
+Run a prompt through the registered provider using `gemini-3.8-flash`:
 
 ```bash
-pi -e ./src/index.ts --model agy-pool/gemini-3.6-flash-high -p "Reply with exactly: OK"
+pi -e ./src/index.ts --model agy-pool/gemini-3.8-flash -p "Reply with exactly: OK"
 ```
 
 ---
 
 ## Development & Testing
 
-All tests run offline using Node.js built-in test runner and local mock HTTP servers; no network access or Google credentials are required.
+All unit tests run offline using Node.js built-in test runner; no credentials or live daemons are required for standard checks:
 
 ```bash
-# Install dependencies
-npm install
-
 # Run TypeScript typecheck
 npm run typecheck
 
