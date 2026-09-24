@@ -37,14 +37,11 @@ Google
 
 ## Installation
 
-Install `pi-agy-pool` as a standard Pi package:
+Download the release `.tgz` artifact from [GitHub Releases](https://github.com/vlxlv/pi-agy-pool/releases) and install it using Pi:
 
 ```bash
-# Install from npm (recommended)
-pi install pi-agy-pool
-
-# Or install from a local checkout / tarball (development / testing alternative)
-pi install ./path/to/pi-agy-pool
+# Install from downloaded release tarball
+pi install /path/to/pi-agy-pool-X.Y.Z.tgz
 ```
 
 Verify that Pi has automatically discovered the extension and registered the models:
@@ -72,8 +69,8 @@ agy-pool  gpt-oss-120b-medium       131.1K   32.8K    no        no
 # List installed packages
 pi list
 
-# Update package
-pi update
+# Update package by reinstalling new release tarball
+pi install /path/to/pi-agy-pool-X.Y.Z.tgz
 
 # Uninstall package
 pi remove pi-agy-pool
@@ -81,9 +78,13 @@ pi remove pi-agy-pool
 
 ### Development & Debugging
 
-During local development or debugging, you can still test uninstalled source directly with the `-e` flag:
+During local development or debugging, you can install directly from a local checkout or run uninstalled source with the `-e` flag:
 
 ```bash
+# Install from local source checkout
+pi install ./path/to/pi-agy-pool
+
+# Or test directly with -e without installation
 pi -e ./src/index.ts --model agy-pool/gemini-3.8-flash -p "Reply with OK"
 ```
 
@@ -167,12 +168,12 @@ npm pack --dry-run --json
 
 ## Releases
 
-All production releases and npm packages are built, verified, and published automatically by GitHub Actions from version tags (`v*`).
+All production releases and package artifacts are built, verified, and published automatically to GitHub Releases by GitHub Actions from version tags (`v*`).
 
 1. **Tag Trigger:** Pushing a release tag (e.g. `v0.3.1`) triggers the automated `.github/workflows/release.yml` workflow.
 2. **Quality Gates:** GitHub Actions runs typechecking, offline tests, and verifies that the git tag strictly matches `"version"` in `package.json`.
-3. **Artifact Inspection:** The workflow inspects the package tarball to verify it contains only approved runtime files before publishing.
-4. **Provenance & OIDC:** Package publication to npm uses npm Trusted Publishing (OIDC attestations) without static secrets, followed by automatic GitHub Release generation. Local or manual `npm publish` is strictly forbidden.
+3. **Artifact Generation & Inspection:** The workflow runs `npm pack` and inspects the resulting distribution tarball (`pi-agy-pool-X.Y.Z.tgz`) to verify it contains only approved runtime files.
+4. **GitHub Release Publication:** The workflow creates the GitHub Release for the tag and attaches `pi-agy-pool-X.Y.Z.tgz` as a release asset. No packages are published to the public npm registry, and local or manual releases are strictly forbidden.
 
 ---
 

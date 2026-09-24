@@ -7,11 +7,10 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 jobs:
   release:
-    name: Release & Publish
+    name: Release Artifacts
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tag
@@ -21,19 +20,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Ensure latest npm for OIDC Trusted Publishing
-        run: npm install -g npm@latest
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Run offline test suite
-        run: npm test
 
       - name: Verify tag matches package.json version
         run: |
@@ -50,12 +36,32 @@ jobs:
           fi
           echo "Verified: Tag '$TAG' matches package.json version '$PACKAGE_VERSION'"
 
-      - name: Inspect and verify package contents
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run offline test suite
+        run: npm test
+
+      - name: Pack distribution tarball
         run: |
-          PACK_JSON=$(npm pack --dry-run --json)
+          TARBALL=$(npm pack)
+          echo "TARBALL_FILE=$TARBALL" >> "$GITHUB_ENV"
+          echo "Generated tarball: $TARBALL"
+
+      - name: Verify tarball contents
+        run: |
           node -e '
-            const pack = JSON.parse(process.argv[1])[0];
-            const files = pack.files.map(f => f.path).sort();
+            const { execSync } = require("child_process");
+            const tarball = process.env.TARBALL_FILE;
+            if (!tarball) {
+              console.error("TARBALL_FILE environment variable not set");
+              process.exit(1);
+            }
+            const output = execSync(`tar -tf "${tarball}"`, { encoding: "utf8" });
+            const files = output.trim().split("\n").filter(Boolean).map(f => f.replace(/^package\//, "")).filter(Boolean).sort();
             const expected = [
               "LICENSE",
               "README.md",
@@ -67,25 +73,22 @@ jobs:
               "src/provider.ts",
               "src/stream.ts"
             ].sort();
-            console.log("Package files count:", files.length);
-            console.log("Package files:", files);
+            console.log("Tarball files count:", files.length);
+            console.log("Tarball files:", files);
             if (files.length !== expected.length || !files.every((f, i) => f === expected[i])) {
-              console.error("Package verification failed: unexpected files list", { files, expected });
+              console.error("Tarball verification failed: unexpected files list", { files, expected });
               process.exit(1);
             }
             for (const forbidden of ["test", "AGENTS.md", "tsconfig.json", ".github", ".git"]) {
               if (files.some(f => f.includes(forbidden))) {
-                console.error("Package verification failed: forbidden pattern found:", forbidden);
+                console.error("Tarball verification failed: forbidden pattern found:", forbidden);
                 process.exit(1);
               }
             }
-            console.log("Package verification PASSED.");
-          ' "$PACK_JSON"
+            console.log("Tarball verification PASSED.");
+          '
 
-      - name: Publish to npm
-        run: npm publish --provenance --access public
-
-      - name: Create GitHub Release
+      - name: Create GitHub Release and attach tarball
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -97,8 +100,10 @@ jobs:
 
           ## Installation
 
+          Download the release `.tgz` artifact below and install with Pi:
+
           ```bash
-          pi install pi-agy-pool
+          pi install ./pi-agy-pool-${VERSION}.tgz
           ```
 
           ## Architecture
@@ -130,7 +135,9 @@ jobs:
 
           `pi-agy-pool` launches official Antigravity headless with `--dangerously-skip-permissions` and `--disable-slash-commands`. Antigravity operates autonomously without interactive stdin tool approval prompts. Do not execute untrusted prompts in sensitive environments.
           EOF
+          VERSION="${TAG#v}"
           sed -i "s/\${TAG}/$TAG/g" /tmp/release_notes.md
-          gh release create "$TAG" \
+          sed -i "s/\${VERSION}/$VERSION/g" /tmp/release_notes.md
+          gh release create "$TAG" "$TARBALL_FILE" \
             --title "pi-agy-pool $TAG" \
             --notes-file /tmp/release_notes.md

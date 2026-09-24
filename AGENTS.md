@@ -311,8 +311,9 @@ When choosing between:
 
 ## 22. Release & Publishing Invariants
 
-- **Automated Production Releases Only:** All production releases and npm packages must be built and published exclusively through GitHub Actions.
+- **Automated Production Releases Only:** All production releases are created exclusively through GitHub Actions.
 - **Tag-Driven:** Production releases are triggered solely by git version tags matching `v*`. Never publish from development branches, pull requests, or unversioned commits.
-- **No Local/Manual Publishing:** Running manual or local `npm publish` is strictly forbidden.
-- **Exact Version Match:** The release git tag (e.g. `v0.3.1`) must strictly match `"version"` in `package.json` (e.g. `0.3.1`). Any mismatch must abort the release immediately prior to publishing.
-- **Pre-Publish Verification Gates:** Offline tests (`npm test`), TypeScript verification (`npm run typecheck`), and package tarball content inspection (`npm pack --dry-run --json`) must pass in CI/CD before publishing. Never bypass or force failed release gates.
+- **GitHub Release Distribution:** Release artifacts are distributed through GitHub Releases as an npm-compatible `.tgz` package produced by `npm pack`. No npm registry publication.
+- **No Local/Manual Releases:** Creating manual releases or publishing locally is strictly forbidden.
+- **Exact Version Match:** The release git tag (e.g. `v0.3.1`) must strictly match `"version"` in `package.json` (e.g. `0.3.1`). Any mismatch must abort the release immediately prior to artifact generation.
+- **Pre-Release Verification Gates:** Offline tests (`npm test`), TypeScript verification (`npm run typecheck`), and package tarball content inspection (`npm pack`) must pass in CI/CD before GitHub Release creation. Never bypass failed release gates.
