@@ -1,0 +1,168 @@
+import { describe, it } from "node:test";
+import assert from "node:assert";
+import path from "node:path";
+import { registerAgyPoolProvider, DEFAULT_BASE_URL } from "../src/provider.ts";
+import { MODELS } from "../src/models.ts";
+import { resetActiveProcesses, activeProcesses } from "../src/stream.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+describe("provider.ts: Pi real provider integration", () => {
+  it("registers provider with real Pi composeModelProvider validator and resolves all 7 models", async () => {
+    let registeredProviderName = "";
+    let registeredConfig: any = null;
+    const registeredHandlers: Record<string, Function> = {};
+
+    const mockPi: Partial<ExtensionAPI> = {
+      registerProvider: (((name: string, config: any) => {
+        registeredProviderName = name;
+        registeredConfig = config;
+      }) as unknown) as ExtensionAPI["registerProvider"],
+      on: (((event: string, handler: any) => {
+        registeredHandlers[event] = handler;
+        return () => {};
+      }) as unknown) as ExtensionAPI["on"],
+    };
+
+    registerAgyPoolProvider(mockPi as ExtensionAPI);
+
+    assert.strictEqual(registeredProviderName, "agy-pool");
+    assert.ok(registeredConfig, "registerProvider was called with config");
+    assert.strictEqual(registeredConfig.baseUrl, DEFAULT_BASE_URL);
+    assert.strictEqual(registeredConfig.baseUrl, "agy-pool");
+    assert.strictEqual(registeredConfig.api, "agy-pool-api");
+    assert.strictEqual(typeof registeredConfig.streamSimple, "function");
+
+    // Load Pi's real composeModelProvider function from @earendil-works/pi-coding-agent
+    const composerPath = path.resolve(
+      import.meta.dirname,
+      "../node_modules/@earendil-works/pi-coding-agent/dist/core/provider-composer.js",
+    );
+    const { composeModelProvider } = await import("file://" + composerPath);
+
+    // Call Pi's actual composition logic with our registered provider config
+    // This strictly verifies that Pi does not throw "baseUrl is required when defining custom models"
+    const composed = composeModelProvider(
+      "agy-pool",
+      undefined,
+      {
+        getProviderIds: () => [],
+        getProvider: () => null,
+        getError: () => null,
+      },
+      registeredConfig,
+    );
+
+    assert.ok(composed, "Provider composition succeeded");
+    assert.strictEqual(composed.id, "agy-pool");
+    assert.strictEqual(composed.baseUrl, "agy-pool");
+
+    // Verify all 7 canonical models resolve from Pi's getModels()
+    const resolvedModels = composed.getModels();
+    assert.strictEqual(resolvedModels.length, 7);
+    const expectedModelIds = [
+      "gemini-3.8-flash",
+      "gemini-3.7-flash",
+      "gemini-3.6-flash",
+      "gemini-3.1-pro",
+      "claude-sonnet-4-6",
+      "claude-opus-4-6-thinking",
+      "gpt-oss-120b-medium",
+    ];
+    assert.deepStrictEqual(
+      resolvedModels.map((m: any) => m.id),
+      expectedModelIds,
+    );
+  });
+
+  it("baseUrl is metadata only and never used for direct HTTP generation", async () => {
+    // Intercept global fetch to prove baseUrl is never called via HTTP
+    const originalFetch = globalThis.fetch;
+    let fetchCalled = false;
+    globalThis.fetch = (async (url: any) => {
+      fetchCalled = true;
+      throw new Error(`Unexpected HTTP fetch call to ${url}`);
+    }) as any;
+
+    try {
+      // Execute streamSimple using mock child process
+      const { PassThrough } = await import("node:stream");
+      const { EventEmitter } = await import("node:events");
+      const childEmitter = new EventEmitter() as any;
+      childEmitter.stdin = new PassThrough();
+      childEmitter.stdout = new PassThrough();
+      childEmitter.stderr = new PassThrough();
+      childEmitter.killed = false;
+      childEmitter.kill = () => {
+        childEmitter.killed = true;
+        return true;
+      };
+
+      const spawnFn = (() => childEmitter) as any;
+      const model = {
+        id: "gemini-3.8-flash",
+        name: "Gemini 3.8 Flash",
+        baseUrl: "agy-pool",
+        api: "agy-pool-api",
+        provider: "agy-pool",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1048576,
+        maxTokens: 65536,
+      } as any;
+
+      const { streamSimple } = await import("../src/stream.ts");
+      const stream = streamSimple(
+        model,
+        { messages: [{ role: "user", content: "Hi", timestamp: 1 }] } as any,
+        { spawnFn },
+      );
+
+      childEmitter.stdout.write('{"event":"init","conversation_id":"c-no-http"}\n');
+      childEmitter.stdout.write('{"event":"step_update","step_update":{"text_delta":"OK"}}\n');
+      childEmitter.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+
+      const res = await stream.result();
+      assert.strictEqual(fetchCalled, false, "fetch() must never be called");
+      assert.strictEqual(res.stopReason, "stop");
+    } finally {
+      globalThis.fetch = originalFetch;
+      resetActiveProcesses();
+    }
+  });
+
+  it("cleans up active child processes on Pi session_shutdown lifecycle event", () => {
+    resetActiveProcesses();
+
+    const registeredHandlers: Record<string, Function> = {};
+    const mockPi: Partial<ExtensionAPI> = {
+      registerProvider: ((() => {}) as unknown) as ExtensionAPI["registerProvider"],
+      on: (((event: string, handler: any) => {
+        registeredHandlers[event] = handler;
+        return () => {};
+      }) as unknown) as ExtensionAPI["on"],
+    };
+
+    registerAgyPoolProvider(mockPi as ExtensionAPI);
+    assert.ok(
+      typeof registeredHandlers["session_shutdown"] === "function",
+      "Must register session_shutdown handler",
+    );
+
+    // Mock an active process in activeProcesses
+    let killed = false;
+    const mockProc = {
+      kill: () => {
+        killed = true;
+      },
+    } as any;
+    activeProcesses.set("conv-lifecycle-test", mockProc);
+    assert.strictEqual(activeProcesses.size, 1);
+
+    // Trigger session_shutdown event
+    registeredHandlers["session_shutdown"]({ type: "session_shutdown", reason: "quit" });
+
+    assert.strictEqual(killed, true, "Process must be killed on session_shutdown");
+    assert.strictEqual(activeProcesses.size, 0, "activeProcesses must be cleared");
+  });
+});

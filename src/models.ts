@@ -2,6 +2,7 @@ import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 
 export const DEFAULT_PROVIDER_NAME = "agy-pool";
 export const API_IDENTIFIER = "agy-pool-api";
+export const DEFAULT_BASE_URL = "agy-pool";
 
 /**
  * Primary model catalog matching native Antigravity Switch Model UI.

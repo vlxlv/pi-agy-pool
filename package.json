@@ -1,25 +1,50 @@
 {
   "name": "pi-agy-pool",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Pi model-provider extension for agy-pool-go",
   "type": "module",
   "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts"
   },
   "keywords": [
-    "pi",
+    "pi-package",
     "pi-extension",
     "agy-pool",
-    "cloudcode",
-    "gemini"
+    "gemini",
+    "antigravity"
+  ],
+  "engines": {
+    "node": ">=22.18.0",
+    "pi": ">=0.80.0"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
   ],
   "author": "vlxlv",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vlxlv/pi-agy-pool.git"
+  },
+  "homepage": "https://github.com/vlxlv/pi-agy-pool#readme",
+  "bugs": {
+    "url": "https://github.com/vlxlv/pi-agy-pool/issues"
+  },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.80.0",
-    "@earendil-works/pi-coding-agent": ">=0.80.0"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.87.1",

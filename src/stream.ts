@@ -31,10 +31,12 @@ export function resetActiveProcesses(): void {
 
 export function handleSignal(
   signal: NodeJS.Signals,
-  exitFn: (code: number) => void = (code) => process.exit(code),
+  exitFn?: (code: number) => void,
 ): void {
   resetActiveProcesses();
-  exitFn(signal === "SIGINT" ? 130 : 143);
+  if (exitFn) {
+    exitFn(signal === "SIGINT" ? 130 : 143);
+  }
 }
 
 const onExit = () => {
@@ -231,20 +233,27 @@ export function streamSimple(
       const conversationId = findConversationId(context);
       let isResumed = false;
 
+      const effort = resolveEffort(model.id, options);
+
       if (conversationId) {
         const existing = activeProcesses.get(conversationId);
         if (existing && existing.isAlive()) {
-          proc = existing;
-          boundConversationId = conversationId;
-          output.responseId = conversationId;
-          (output as unknown as Record<string, unknown>).conversationId = conversationId;
-          isResumed = true;
+          if (existing.modelId === model.id && existing.effort === effort) {
+            proc = existing;
+            boundConversationId = conversationId;
+            output.responseId = conversationId;
+            (output as unknown as Record<string, unknown>).conversationId = conversationId;
+            isResumed = true;
+          } else {
+            // Model or effort changed: do not silently reuse mismatched process configuration.
+            // Terminate old process; conversation continuity is preserved via --conversation <id>.
+            existing.kill();
+            activeProcesses.delete(conversationId);
+          }
         } else if (existing) {
           activeProcesses.delete(conversationId);
         }
       }
-
-      const effort = resolveEffort(model.id, options);
 
       if (!proc) {
         proc = new AgyProcess({

@@ -624,4 +624,133 @@ describe("stream.ts: streamSimple", () => {
     assert.strictEqual(result.usage.totalTokens, 165);
     assert.strictEqual(result.usage.reasoning, 10);
   });
+
+  it("model switching mid-session terminates old process and resumes with new model and --conversation", async () => {
+    let spawnCount = 0;
+    const spawnedModels: string[] = [];
+    const lastSpawnArgsList: string[][] = [];
+
+    const mock1 = createMockChildProcess();
+    const mock2 = createMockChildProcess();
+
+    const spawnFn = ((_bin: string, args: string[]) => {
+      spawnCount++;
+      lastSpawnArgsList.push(args);
+      const modelIdx = args.indexOf("--model");
+      if (modelIdx !== -1) {
+        spawnedModels.push(args[modelIdx + 1]);
+      }
+      return spawnCount === 1 ? mock1.child : mock2.child;
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    // Turn 1 with gemini-3.8-flash
+    const context1 = {
+      messages: [{ role: "user", content: "Turn 1", timestamp: 1 }],
+    } as unknown as TranscriptContext;
+    const stream1 = streamSimple(dummyModel, context1, { spawnFn });
+    mock1.stdout.write('{"event":"init","conversation_id":"c-switch-model"}\n');
+    mock1.stdout.write('{"event":"step_update","step_update":{"text_delta":"Reply 1"}}\n');
+    mock1.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+    const result1 = await stream1.result();
+
+    assert.strictEqual(spawnCount, 1);
+    assert.strictEqual(spawnedModels[0], "gemini-3.8-flash");
+
+    // Turn 2 with gemini-3.1-pro (model changed!)
+    const model2: Model<"agy-pool-api"> = {
+      ...dummyModel,
+      id: "gemini-3.1-pro",
+      name: "Gemini 3.1 Pro",
+    };
+    const context2 = {
+      messages: [
+        { role: "user", content: "Turn 1", timestamp: 1 },
+        result1,
+        { role: "user", content: "Turn 2 with new model", timestamp: 2 },
+      ],
+    } as unknown as TranscriptContext;
+
+    const stream2 = streamSimple(model2, context2, { spawnFn });
+
+    // Old process must be killed with SIGTERM
+    assert.ok(mock1.signalsReceived.includes("SIGTERM"), "Mismatched model process must be killed");
+    // New process spawned
+    assert.strictEqual(spawnCount, 2);
+    assert.strictEqual(spawnedModels[1], "gemini-3.1-pro");
+    // Preserves conversation continuity via --conversation
+    assert.ok(lastSpawnArgsList[1].includes("--conversation"));
+    assert.ok(lastSpawnArgsList[1].includes("c-switch-model"));
+
+    mock2.stdout.write('{"event":"init","conversation_id":"c-switch-model"}\n');
+    mock2.stdout.write('{"event":"step_update","step_update":{"text_delta":"Reply 2"}}\n');
+    mock2.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+    const result2 = await stream2.result();
+    assert.strictEqual(result2.responseId, "c-switch-model");
+  });
+
+  it("effort switching mid-session terminates old process and resumes with new effort and --conversation", async () => {
+    let spawnCount = 0;
+    const lastSpawnArgsList: string[][] = [];
+
+    const mock1 = createMockChildProcess();
+    const mock2 = createMockChildProcess();
+
+    const spawnFn = ((_bin: string, args: string[]) => {
+      spawnCount++;
+      lastSpawnArgsList.push(args);
+      return spawnCount === 1 ? mock1.child : mock2.child;
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    // Turn 1 with effort: low
+    const context1 = {
+      messages: [{ role: "user", content: "Turn 1", timestamp: 1 }],
+    } as unknown as TranscriptContext;
+    const stream1 = streamSimple(dummyModel, context1, { spawnFn, reasoning: "low" });
+    mock1.stdout.write('{"event":"init","conversation_id":"c-switch-effort"}\n');
+    mock1.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+    const result1 = await stream1.result();
+
+    assert.strictEqual(spawnCount, 1);
+    const effort1Idx = lastSpawnArgsList[0].indexOf("--effort");
+    assert.strictEqual(lastSpawnArgsList[0][effort1Idx + 1], "low");
+
+    // Turn 2 with effort: high (effort changed!)
+    const context2 = {
+      messages: [
+        { role: "user", content: "Turn 1", timestamp: 1 },
+        result1,
+        { role: "user", content: "Turn 2 with high effort", timestamp: 2 },
+      ],
+    } as unknown as TranscriptContext;
+    const stream2 = streamSimple(dummyModel, context2, { spawnFn, reasoning: "high" });
+
+    // Old process must be killed with SIGTERM
+    assert.ok(mock1.signalsReceived.includes("SIGTERM"), "Mismatched effort process must be killed");
+    assert.strictEqual(spawnCount, 2);
+    const effort2Idx = lastSpawnArgsList[1].indexOf("--effort");
+    assert.strictEqual(lastSpawnArgsList[1][effort2Idx + 1], "high");
+    assert.ok(lastSpawnArgsList[1].includes("--conversation"));
+    assert.ok(lastSpawnArgsList[1].includes("c-switch-effort"));
+
+    mock2.stdout.write('{"event":"init","conversation_id":"c-switch-effort"}\n');
+    mock2.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+    const result2 = await stream2.result();
+    assert.strictEqual(result2.responseId, "c-switch-effort");
+  });
+
+  it("handleSignal cleans up children without calling process.exit when no exitFn provided", () => {
+    const mock = createMockChildProcess();
+    const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
+    const context = {
+      messages: [{ role: "user", content: "Sig test", timestamp: 1 }],
+    } as unknown as TranscriptContext;
+    streamSimple(dummyModel, context, { spawnFn });
+    mock.stdout.write('{"event":"init","conversation_id":"c-sig-clean"}\n');
+    assert.strictEqual(activeProcesses.has("c-sig-clean"), true);
+
+    // Call handleSignal with NO exitFn - must NOT throw or exit process
+    handleSignal("SIGINT");
+    assert.strictEqual(activeProcesses.size, 0);
+    assert.ok(mock.signalsReceived.includes("SIGTERM"));
+  });
 });
