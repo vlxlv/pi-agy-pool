@@ -1,33 +1,21 @@
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { streamSimple } from "./stream.ts";
 
-export const DEFAULT_PROVIDER_NAME = "agy-pool";
-export const DEFAULT_BASE_URL = "http://127.0.0.1:8899";
-export const API_IDENTIFIER = "agy-pool-api";
+import {
+  API_IDENTIFIER,
+  DEFAULT_BASE_URL,
+  DEFAULT_PROVIDER_NAME,
+  MODELS,
+  VERIFIED_MODELS,
+} from "./models.ts";
 
-/**
- * Explicit model list verified against the local environment / Cloud Code PA gateway.
- */
-export const VERIFIED_MODELS: ProviderModelConfig[] = [
-  {
-    id: "gemini-2.5-flash",
-    name: "Gemini 2.5 Flash (agy-pool)",
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-  {
-    id: "gemini-2.5-pro",
-    name: "Gemini 2.5 Pro (agy-pool)",
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-];
+export {
+  API_IDENTIFIER,
+  DEFAULT_BASE_URL,
+  DEFAULT_PROVIDER_NAME,
+  MODELS,
+  VERIFIED_MODELS,
+};
 
 export interface AgyPoolProviderOptions {
   name?: string;

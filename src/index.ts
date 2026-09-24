@@ -8,6 +8,7 @@ export default function (pi: ExtensionAPI): void {
   registerAgyPoolProvider(pi);
 }
 
+export * from "./models.ts";
 export * from "./provider.ts";
 export * from "./request.ts";
 export * from "./sse.ts";
