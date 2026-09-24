@@ -40,10 +40,10 @@ Google
 Install `pi-agy-pool` as a standard Pi package:
 
 ```bash
-# Install from npm
-pi install npm:pi-agy-pool
+# Install from npm (recommended)
+pi install pi-agy-pool
 
-# Or install from a local checkout / tarball
+# Or install from a local checkout / tarball (development / testing alternative)
 pi install ./path/to/pi-agy-pool
 ```
 
@@ -76,7 +76,7 @@ pi list
 pi update
 
 # Uninstall package
-pi remove npm:pi-agy-pool
+pi remove pi-agy-pool
 ```
 
 ### Development & Debugging
@@ -162,6 +162,17 @@ npm test
 # Check distribution package contents
 npm pack --dry-run --json
 ```
+
+---
+
+## Releases
+
+All production releases and npm packages are built, verified, and published automatically by GitHub Actions from version tags (`v*`).
+
+1. **Tag Trigger:** Pushing a release tag (e.g. `v0.3.1`) triggers the automated `.github/workflows/release.yml` workflow.
+2. **Quality Gates:** GitHub Actions runs typechecking, offline tests, and verifies that the git tag strictly matches `"version"` in `package.json`.
+3. **Artifact Inspection:** The workflow inspects the package tarball to verify it contains only approved runtime files before publishing.
+4. **Provenance & OIDC:** Package publication to npm uses npm Trusted Publishing (OIDC attestations) without static secrets, followed by automatic GitHub Release generation. Local or manual `npm publish` is strictly forbidden.
 
 ---
 

@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    name: Release & Publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Ensure latest npm for OIDC Trusted Publishing
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run offline test suite
+        run: npm test
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
+            echo "::error::Tag '$TAG' does not match format 'vX.Y.Z'"
+            exit 1
+          fi
+          EXPECTED_VERSION="${TAG#v}"
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          if [ "$EXPECTED_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "::error::Tag version '$EXPECTED_VERSION' does not match package.json version '$PACKAGE_VERSION'"
+            exit 1
+          fi
+          echo "Verified: Tag '$TAG' matches package.json version '$PACKAGE_VERSION'"
+
+      - name: Inspect and verify package contents
+        run: |
+          PACK_JSON=$(npm pack --dry-run --json)
+          node -e '
+            const pack = JSON.parse(process.argv[1])[0];
+            const files = pack.files.map(f => f.path).sort();
+            const expected = [
+              "LICENSE",
+              "README.md",
+              "package.json",
+              "src/agy-events.ts",
+              "src/agy-process.ts",
+              "src/index.ts",
+              "src/models.ts",
+              "src/provider.ts",
+              "src/stream.ts"
+            ].sort();
+            console.log("Package files count:", files.length);
+            console.log("Package files:", files);
+            if (files.length !== expected.length || !files.every((f, i) => f === expected[i])) {
+              console.error("Package verification failed: unexpected files list", { files, expected });
+              process.exit(1);
+            }
+            for (const forbidden of ["test", "AGENTS.md", "tsconfig.json", ".github", ".git"]) {
+              if (files.some(f => f.includes(forbidden))) {
+                console.error("Package verification failed: forbidden pattern found:", forbidden);
+                process.exit(1);
+              }
+            }
+            console.log("Package verification PASSED.");
+          ' "$PACK_JSON"
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat << 'EOF' > /tmp/release_notes.md
+          # pi-agy-pool ${TAG}
+
+          Pi model-provider extension for `agy-pool-go`.
+
+          ## Installation
+
+          ```bash
+          pi install pi-agy-pool
+          ```
+
+          ## Architecture
+
+          ```text
+          Pi
+           ↓
+          pi-agy-pool (installed extension package)
+           ↓ subprocess spawn (argument array)
+          agy-pool run -- <native AGY stream-json args>
+           ↓
+          official agy-native
+           ↓ CLOUD_CODE_URL configured by agy-pool-go
+          agy-pool-go local gateway (:8899)
+           ↓
+          existing multi-account scheduler / OAuth / quota / failover
+           ↓
+          Google
+          ```
+
+          ## External Prerequisites
+
+          - **Pi CLI** (`pi`) `>=0.80.0`
+          - **`agy-pool`** binary installed and available in `PATH` (or configured via `AGY_POOL_BIN`)
+          - Running **`agy-pool-go`** daemon
+          - Official **Antigravity** installed and managed by `agy-pool`
+
+          ## Autonomous Permission Notice
+
+          `pi-agy-pool` launches official Antigravity headless with `--dangerously-skip-permissions` and `--disable-slash-commands`. Antigravity operates autonomously without interactive stdin tool approval prompts. Do not execute untrusted prompts in sensitive environments.
+          EOF
+          sed -i "s/\${TAG}/$TAG/g" /tmp/release_notes.md
+          gh release create "$TAG" \
+            --title "pi-agy-pool $TAG" \
+            --notes-file /tmp/release_notes.md
