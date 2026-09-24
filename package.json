@@ -1,0 +1,30 @@
+{
+  "name": "pi-agy-pool",
+  "version": "0.1.0",
+  "description": "Pi model-provider extension for agy-pool-go",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "agy-pool",
+    "cloudcode",
+    "gemini"
+  ],
+  "author": "vlxlv",
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.80.0",
+    "@earendil-works/pi-coding-agent": ">=0.80.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.87.1",
+    "@earendil-works/pi-coding-agent": "^0.87.1",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
