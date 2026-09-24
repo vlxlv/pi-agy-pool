@@ -114,4 +114,28 @@ describe("agy-events.ts: AgyEventDecoder", () => {
     assert.strictEqual(update.usage.total_tokens, 30);
     assert.strictEqual(update.usage.thinking_tokens, 5);
   });
+
+  it("enforces maximum record size and throws cleanly on record overflow", () => {
+    // Test with small limit of 50 bytes
+    const decoder = new AgyEventDecoder(50);
+    const oversizedRecord = '{"event":"step_update","step_update":{"text_delta":"' + "a".repeat(100) + '"}}\n';
+    assert.throws(
+      () => decoder.feed(oversizedRecord),
+      /NDJSON record size exceeded limit of 50 bytes/,
+    );
+  });
+
+  it("enforces maximum buffer size without line delimiter and throws cleanly", () => {
+    const decoder = new AgyEventDecoder(50);
+    const endlessChunk = "x".repeat(60);
+    assert.throws(
+      () => decoder.feed(endlessChunk),
+      /NDJSON buffer limit exceeded \(50 bytes\) without valid line delimiter/,
+    );
+
+    // After overflow, buffer is cleared and subsequent valid data can be parsed
+    const valid = decoder.feed('{"event":"init","conversation_id":"fresh"}\n');
+    assert.strictEqual(valid.length, 1);
+    assert.strictEqual(valid[0].event, "init");
+  });
 });

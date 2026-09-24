@@ -139,6 +139,47 @@ describe("agy-process.ts: AgyProcess", () => {
     assert.ok(turn2Stdin.includes('"content":"Turn 2 prompt"'));
   });
 
+  it("queues concurrent runTurn calls sequentially on the same process", async () => {
+    const mock = createMockChildProcess();
+    const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
+
+    const proc = new AgyProcess({
+      modelId: "gemini-3.8-flash",
+      spawnFn,
+    });
+
+    mock.stdout.write('{"event":"init","conversation_id":"c-queue"}\n');
+    await proc.ready;
+
+    const executionLog: string[] = [];
+
+    mock.stdin.on("data", (chunk) => {
+      const str = chunk.toString();
+      if (str.includes("First queued")) {
+        executionLog.push("stdin_first");
+        setTimeout(() => {
+          mock.stdout.write('{"event":"step_update","step_update":{"text_delta":"First reply"}}\n');
+          mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+        }, 10);
+      } else if (str.includes("Second queued")) {
+        executionLog.push("stdin_second");
+        setTimeout(() => {
+          mock.stdout.write('{"event":"step_update","step_update":{"text_delta":"Second reply"}}\n');
+          mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+        }, 10);
+      }
+    });
+
+    // Launch both turns simultaneously
+    const p1 = proc.runTurn("First queued", () => {});
+    const p2 = proc.runTurn("Second queued", () => {});
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+    assert.strictEqual(r1.status, "SUCCESS");
+    assert.strictEqual(r2.status, "SUCCESS");
+    assert.deepStrictEqual(executionLog, ["stdin_first", "stdin_second"]);
+  });
+
   it("handles AbortSignal by sending SIGINT and invalidating process", async () => {
     const mock = createMockChildProcess();
     const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;

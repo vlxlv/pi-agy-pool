@@ -18,6 +18,7 @@ export interface AgyProcessOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   spawnFn?: typeof spawn;
+  maxRecordSize?: number;
 }
 
 /**
@@ -33,7 +34,7 @@ export class AgyProcess extends EventEmitter {
   readonly modelId: string;
   readonly effort?: AgyEffort;
   private readonly child: ChildProcess;
-  private readonly decoder = new AgyEventDecoder();
+  private readonly decoder: AgyEventDecoder;
 
   conversationId?: string;
   sessionId?: string;
@@ -42,6 +43,7 @@ export class AgyProcess extends EventEmitter {
   private _isBusy = false;
   private _isAborted = false;
   private stderrTail = "";
+  private turnQueue: Promise<unknown> = Promise.resolve();
 
   readonly ready: Promise<AgyInitEvent>;
   private readyResolve!: (value: AgyInitEvent) => void;
@@ -52,6 +54,7 @@ export class AgyProcess extends EventEmitter {
     this.modelId = options.modelId;
     this.effort = options.effort;
     this.conversationId = options.conversationId;
+    this.decoder = new AgyEventDecoder(options.maxRecordSize);
 
     // Prevent Node unhandled error crash when listeners are registered/detached per turn
     this.on("error", () => {});
@@ -107,16 +110,27 @@ export class AgyProcess extends EventEmitter {
   private setupChildHandlers(): void {
     if (this.child.stdout) {
       this.child.stdout.on("data", (chunk: Buffer) => {
-        const events = this.decoder.feed(chunk);
-        for (const event of events) {
-          this.handleEvent(event);
+        try {
+          const events = this.decoder.feed(chunk);
+          for (const event of events) {
+            this.handleEvent(event);
+          }
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          this.emit("error", error);
+          this.abort().catch(() => {});
         }
       });
 
       this.child.stdout.on("end", () => {
-        const events = this.decoder.flush();
-        for (const event of events) {
-          this.handleEvent(event);
+        try {
+          const events = this.decoder.flush();
+          for (const event of events) {
+            this.handleEvent(event);
+          }
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          this.emit("error", error);
         }
       });
     }
@@ -172,6 +186,7 @@ export class AgyProcess extends EventEmitter {
 
   /**
    * Executes a turn by writing user message JSON to stdin and streaming events.
+   * Serializes turns belonging to the same AGY process in order.
    */
   runTurn(
     prompt: string,
@@ -186,10 +201,54 @@ export class AgyProcess extends EventEmitter {
       return Promise.reject(new Error("AGY process is not alive"));
     }
 
-    if (this._isBusy) {
-      // ponytail: sequential turns per session, parallel turn queueing deferred until pi supports concurrent session turns
-      return Promise.reject(new Error("AGY process is busy with another turn"));
+    if (!this._isBusy) {
+      const turnPromise = this.executeTurn(prompt, onEvent, signal);
+      this.turnQueue = turnPromise.then(
+        () => {},
+        () => {},
+      );
+      return turnPromise;
     }
+
+    let abortQueued: (() => void) | undefined;
+    const abortPromise = new Promise<never>((_, reject) => {
+      if (signal) {
+        abortQueued = () => {
+          this.abort().catch(() => {});
+          reject(new Error("Request was aborted"));
+        };
+        signal.addEventListener("abort", abortQueued, { once: true });
+      }
+    });
+
+    const run = async (): Promise<AgyResultEvent> => {
+      if (abortQueued && signal) {
+        signal.removeEventListener("abort", abortQueued);
+      }
+      if (signal?.aborted) {
+        await this.abort().catch(() => {});
+        throw new Error("Request was aborted");
+      }
+      if (!this.isAlive()) {
+        throw new Error("AGY process is not alive");
+      }
+      return this.executeTurn(prompt, onEvent, signal);
+    };
+
+    const queued = this.turnQueue.then(run, run);
+    this.turnQueue = queued.then(
+      () => {},
+      () => {},
+    );
+
+    return Promise.race([queued, abortPromise]);
+  }
+
+  private executeTurn(
+    prompt: string,
+    onEvent: (event: AgyEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<AgyResultEvent> {
 
     const stdin = this.child.stdin;
     if (!stdin || stdin.destroyed) {

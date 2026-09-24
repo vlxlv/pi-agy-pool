@@ -17,27 +17,51 @@ import type { spawn } from "node:child_process";
 // ponytail: in-memory conversation map per process, external persistence/daemon handled by agy-pool-go
 export const activeProcesses = new Map<string, AgyProcess>();
 
-let exitHookRegistered = false;
-function registerExitHookOnce(): void {
-  if (!exitHookRegistered) {
-    exitHookRegistered = true;
-    process.once("exit", () => {
-      for (const proc of activeProcesses.values()) {
-        proc.kill();
-      }
-      activeProcesses.clear();
-    });
-  }
-}
+let shutdownHooksRegistered = false;
 
 /**
- * Clear all active processes. Used for test teardown.
+ * Clear all active processes. Used for test teardown and shutdown.
  */
 export function resetActiveProcesses(): void {
   for (const proc of activeProcesses.values()) {
     proc.kill();
   }
   activeProcesses.clear();
+}
+
+export function handleSignal(
+  signal: NodeJS.Signals,
+  exitFn: (code: number) => void = (code) => process.exit(code),
+): void {
+  resetActiveProcesses();
+  exitFn(signal === "SIGINT" ? 130 : 143);
+}
+
+const onExit = () => {
+  resetActiveProcesses();
+};
+const onSigInt = () => {
+  handleSignal("SIGINT");
+};
+const onSigTerm = () => {
+  handleSignal("SIGTERM");
+};
+
+export function registerShutdownHooksOnce(): void {
+  if (shutdownHooksRegistered) {
+    return;
+  }
+  shutdownHooksRegistered = true;
+  process.once("exit", onExit);
+  process.once("SIGINT", onSigInt);
+  process.once("SIGTERM", onSigTerm);
+}
+
+export function unregisterShutdownHooksForTesting(): void {
+  process.removeListener("exit", onExit);
+  process.removeListener("SIGINT", onSigInt);
+  process.removeListener("SIGTERM", onSigTerm);
+  shutdownHooksRegistered = false;
 }
 
 /**
@@ -174,7 +198,7 @@ export function streamSimple(
   context: TranscriptContext,
   options?: ExtendedStreamOptions,
 ): AssistantMessageEventStream {
-  registerExitHookOnce();
+  registerShutdownHooksOnce();
   const stream = createAssistantMessageEventStream();
 
   const output: AssistantMessage = {
@@ -209,7 +233,7 @@ export function streamSimple(
 
       if (conversationId) {
         const existing = activeProcesses.get(conversationId);
-        if (existing && existing.isAlive() && !existing.isBusy()) {
+        if (existing && existing.isAlive()) {
           proc = existing;
           boundConversationId = conversationId;
           output.responseId = conversationId;
@@ -260,12 +284,15 @@ export function streamSimple(
           output.responseId = init.conversation_id;
           (output as unknown as Record<string, unknown>).conversationId = init.conversation_id;
           if (init.conversation_id && proc) {
+            const alreadyBound = activeProcesses.get(init.conversation_id) === proc;
             activeProcesses.set(init.conversation_id, proc);
-            proc.once("exit", () => {
-              if (boundConversationId) {
-                activeProcesses.delete(boundConversationId);
-              }
-            });
+            if (!alreadyBound) {
+              proc.once("exit", () => {
+                if (boundConversationId) {
+                  activeProcesses.delete(boundConversationId);
+                }
+              });
+            }
           }
           if (!startedEmitted) {
             startedEmitted = true;
@@ -318,6 +345,31 @@ export function streamSimple(
 
       // Execute the turn
       const result = await proc.runTurn(prompt, handleEvent, options?.signal);
+
+      // Terminal usage fallback from result event if not already populated or if provided authoritatively
+      const finalUsage =
+        (result.result?.usage as Record<string, unknown> | undefined) ||
+        (result.data?.usage as Record<string, unknown> | undefined);
+      if (finalUsage) {
+        if (typeof finalUsage.input_tokens === "number") {
+          output.usage.input = finalUsage.input_tokens;
+        }
+        if (typeof finalUsage.output_tokens === "number") {
+          output.usage.output = finalUsage.output_tokens;
+        }
+        if (typeof finalUsage.total_tokens === "number") {
+          output.usage.totalTokens = finalUsage.total_tokens;
+        }
+        if (typeof finalUsage.thinking_tokens === "number") {
+          output.usage.reasoning = finalUsage.thinking_tokens;
+        }
+      }
+      if (
+        output.usage.totalTokens === 0 &&
+        (output.usage.input > 0 || output.usage.output > 0)
+      ) {
+        output.usage.totalTokens = output.usage.input + output.usage.output;
+      }
 
       const stopReason = result.data?.stop_reason || result.result?.stop_reason;
       if (stopReason) {

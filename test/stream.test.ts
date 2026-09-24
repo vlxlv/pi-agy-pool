@@ -16,9 +16,12 @@ import {
   activeProcesses,
   buildTurnPrompt,
   findConversationId,
+  handleSignal,
+  registerShutdownHooksOnce,
   resetActiveProcesses,
   resolveEffort,
   streamSimple,
+  unregisterShutdownHooksForTesting,
 } from "../src/stream.ts";
 
 function createMockChildProcess(): {
@@ -444,5 +447,181 @@ describe("stream.ts: streamSimple", () => {
         );
       }
     }
+  });
+
+  it("same-session concurrency: simultaneous calls for the same session serialize on 1 process without overwriting activeProcesses", async () => {
+    let spawnCount = 0;
+    const mock = createMockChildProcess();
+    const spawnFn = (() => {
+      spawnCount++;
+      return mock.child;
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    // Establish conversation first
+    const initContext = {
+      messages: [{ role: "user", content: "Init", timestamp: 1 }],
+    } as unknown as TranscriptContext;
+    const initStream = streamSimple(dummyModel, initContext, { spawnFn });
+    mock.stdout.write('{"event":"init","conversation_id":"c-concurrent"}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"text_delta":"Init reply"}}\n');
+    mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+    await initStream.result();
+
+    assert.strictEqual(spawnCount, 1);
+    assert.strictEqual(activeProcesses.has("c-concurrent"), true);
+
+    // Now launch two simultaneous turns for conversation c-concurrent
+    const turn1Context = {
+      messages: [
+        { role: "user", content: "Init", timestamp: 1 },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Init reply" }],
+          responseId: "c-concurrent",
+          timestamp: 2,
+        },
+        { role: "user", content: "Turn 1 question", timestamp: 3 },
+      ],
+    } as unknown as TranscriptContext;
+
+    const turn2Context = {
+      messages: [
+        { role: "user", content: "Init", timestamp: 1 },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Init reply" }],
+          responseId: "c-concurrent",
+          timestamp: 2,
+        },
+        { role: "user", content: "Turn 1 question", timestamp: 3 },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Turn 1 reply" }],
+          responseId: "c-concurrent",
+          timestamp: 4,
+        },
+        { role: "user", content: "Turn 2 question", timestamp: 5 },
+      ],
+    } as unknown as TranscriptContext;
+
+    const orderOfExecution: string[] = [];
+
+    // Track stdin writes to simulate server responses
+    mock.stdin.on("data", (chunk) => {
+      const str = chunk.toString();
+      if (str.includes("Turn 1 question")) {
+        orderOfExecution.push("turn1_stdin");
+        setTimeout(() => {
+          mock.stdout.write(
+            '{"event":"step_update","step_update":{"text_delta":"Turn 1 reply"}}\n',
+          );
+          mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+        }, 10);
+      } else if (str.includes("Turn 2 question")) {
+        orderOfExecution.push("turn2_stdin");
+        setTimeout(() => {
+          mock.stdout.write(
+            '{"event":"step_update","step_update":{"text_delta":"Turn 2 reply"}}\n',
+          );
+          mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+        }, 10);
+      }
+    });
+
+    // Start stream 1 and stream 2 simultaneously
+    const stream1 = streamSimple(dummyModel, turn1Context, { spawnFn });
+    const stream2 = streamSimple(dummyModel, turn2Context, { spawnFn });
+
+    // Ensure activeProcesses was NOT deleted or overwritten
+    assert.strictEqual(activeProcesses.has("c-concurrent"), true);
+
+    const [res1, res2] = await Promise.all([stream1.result(), stream2.result()]);
+
+    // Still only 1 child process spawned in total
+    assert.strictEqual(spawnCount, 1);
+    assert.strictEqual(activeProcesses.has("c-concurrent"), true);
+    assert.strictEqual(activeProcesses.get("c-concurrent")?.isAlive(), true);
+    assert.deepStrictEqual(orderOfExecution, ["turn1_stdin", "turn2_stdin"]);
+    assert.strictEqual(res1.content[0].type === "text" && res1.content[0].text, "Turn 1 reply");
+    assert.strictEqual(res2.content[0].type === "text" && res2.content[0].text, "Turn 2 reply");
+  });
+
+  it("shutdown signals: cleans up active children on SIGINT and SIGTERM without listener leaks", () => {
+    unregisterShutdownHooksForTesting();
+
+    const sigintListenersBefore = process.listenerCount("SIGINT");
+    const sigtermListenersBefore = process.listenerCount("SIGTERM");
+    const exitListenersBefore = process.listenerCount("exit");
+
+    registerShutdownHooksOnce();
+    // Idempotence: calling again does not add extra listeners
+    registerShutdownHooksOnce();
+
+    assert.strictEqual(process.listenerCount("SIGINT"), sigintListenersBefore + 1);
+    assert.strictEqual(process.listenerCount("SIGTERM"), sigtermListenersBefore + 1);
+    assert.strictEqual(process.listenerCount("exit"), exitListenersBefore + 1);
+
+    // Mock an active process
+    const mock = createMockChildProcess();
+    const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
+    const context = {
+      messages: [{ role: "user", content: "Sig test", timestamp: 1 }],
+    } as unknown as TranscriptContext;
+    streamSimple(dummyModel, context, { spawnFn });
+    mock.stdout.write('{"event":"init","conversation_id":"c-sigint"}\n');
+
+    assert.strictEqual(activeProcesses.has("c-sigint"), true);
+
+    let exitCode: number | undefined;
+    // Invoke signal handler for SIGINT with mock exitFn
+    handleSignal("SIGINT", (code) => {
+      exitCode = code;
+    });
+
+    // Children cleaned up and activeProcesses cleared
+    assert.strictEqual(exitCode, 130);
+    assert.strictEqual(activeProcesses.size, 0);
+    assert.ok(mock.signalsReceived.includes("SIGTERM"));
+
+    // Also test SIGTERM cleanup
+    const mockTerm = createMockChildProcess();
+    const spawnFnTerm = (() => mockTerm.child) as unknown as typeof import("node:child_process").spawn;
+    streamSimple(dummyModel, context, { spawnFn: spawnFnTerm });
+    mockTerm.stdout.write('{"event":"init","conversation_id":"c-sigterm"}\n');
+    assert.strictEqual(activeProcesses.has("c-sigterm"), true);
+
+    let termExitCode: number | undefined;
+    handleSignal("SIGTERM", (code) => {
+      termExitCode = code;
+    });
+    assert.strictEqual(termExitCode, 143);
+    assert.strictEqual(activeProcesses.size, 0);
+    assert.ok(mockTerm.signalsReceived.includes("SIGTERM"));
+
+    unregisterShutdownHooksForTesting();
+  });
+
+  it("terminal usage fallback: populates usage from result event when step_update omits usage", async () => {
+    const mock = createMockChildProcess();
+    const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
+
+    const context = {
+      messages: [{ role: "user", content: "Usage test", timestamp: 1 }],
+    } as unknown as TranscriptContext;
+    const stream = streamSimple(dummyModel, context, { spawnFn });
+
+    mock.stdout.write('{"event":"init","conversation_id":"c-usage-fallback"}\n');
+    // step_update has NO usage
+    mock.stdout.write('{"event":"step_update","step_update":{"text_delta":"Answer"}}\n');
+    // result has usage in result.result.usage
+    mock.stdout.write(
+      '{"event":"result","status":"SUCCESS","result":{"usage":{"input_tokens":120,"output_tokens":45,"total_tokens":165,"thinking_tokens":10}}}\n',
+    );
+
+    const result = await stream.result();
+    assert.strictEqual(result.usage.input, 120);
+    assert.strictEqual(result.usage.output, 45);
+    assert.strictEqual(result.usage.totalTokens, 165);
+    assert.strictEqual(result.usage.reasoning, 10);
   });
 });

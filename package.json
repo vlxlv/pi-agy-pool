@@ -1,6 +1,6 @@
 {
   "name": "pi-agy-pool",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pi model-provider extension for agy-pool-go",
   "type": "module",
   "main": "src/index.ts",
