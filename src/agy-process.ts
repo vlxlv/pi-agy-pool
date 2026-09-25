@@ -99,6 +99,10 @@ export class AgyProcess extends EventEmitter {
     return this._isAlive && !this._isAborted && !this.child.killed;
   }
 
+  get pid(): number | undefined {
+    return this.child.pid;
+  }
+
   isBusy(): boolean {
     return this._isBusy;
   }

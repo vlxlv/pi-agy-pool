@@ -17,16 +17,100 @@ import type { spawn } from "node:child_process";
 // ponytail: in-memory conversation map per process, external persistence/daemon handled by agy-pool-go
 export const activeProcesses = new Map<string, AgyProcess>();
 
+export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:\n\n<summary>\n`;
+export const COMPACTION_SUMMARY_SUFFIX = `\n</summary>`;
+
+export interface SessionCompactionState {
+  sessionId: string;
+  needsBootstrap: boolean;
+  activeConversationId?: string;
+  retiredConversationIds: Set<string>;
+}
+
+export const sessionStates = new Map<string, SessionCompactionState>();
+export const conversationToSession = new Map<string, string>();
+export const retiredConversationIds = new Set<string>();
+export const validPostCompactionConversations = new Set<string>();
+
+let currentSessionId: string | undefined;
+
+export function setCurrentSessionId(sessionId?: string): void {
+  currentSessionId = sessionId;
+}
+
+export function getCurrentSessionId(): string | undefined {
+  return currentSessionId;
+}
+
+export function getSessionState(sessionId: string): SessionCompactionState {
+  let state = sessionStates.get(sessionId);
+  if (!state) {
+    state = {
+      sessionId,
+      needsBootstrap: false,
+      retiredConversationIds: new Set(),
+    };
+    sessionStates.set(sessionId, state);
+  }
+  return state;
+}
+
+/**
+ * Safely retire the active conversation and process for a session.
+ * Marks the session as requiring a fresh AGY bootstrap.
+ */
+export function retireSessionConversation(sessionId: string): void {
+  const state = getSessionState(sessionId);
+  state.needsBootstrap = true;
+
+  if (state.activeConversationId) {
+    const oldConvId = state.activeConversationId;
+    state.retiredConversationIds.add(oldConvId);
+    retiredConversationIds.add(oldConvId);
+    validPostCompactionConversations.delete(oldConvId);
+
+    const proc = activeProcesses.get(oldConvId);
+    if (proc) {
+      if (!proc.isBusy()) {
+        proc.kill();
+        activeProcesses.delete(oldConvId);
+      } else {
+        // Safe retirement: child is executing a turn; terminate once settled
+        proc.once("result", () => {
+          proc.kill();
+          activeProcesses.delete(oldConvId);
+        });
+      }
+    } else {
+      activeProcesses.delete(oldConvId);
+    }
+
+    state.activeConversationId = undefined;
+  }
+}
+
+/**
+ * Authoritative compaction notification for a session.
+ */
+export function markSessionCompacted(sessionId: string): void {
+  retireSessionConversation(sessionId);
+}
+
 let shutdownHooksRegistered = false;
 
 /**
- * Clear all active processes. Used for test teardown and shutdown.
+ * Clear all active processes and session tracking. Used for test teardown and shutdown.
  */
 export function resetActiveProcesses(): void {
   for (const proc of activeProcesses.values()) {
     proc.kill();
   }
   activeProcesses.clear();
+  sessionStates.clear();
+  conversationToSession.clear();
+  retiredConversationIds.clear();
+  validPostCompactionConversations.clear();
+  currentSessionId = undefined;
 }
 
 export function handleSignal(
@@ -66,23 +150,195 @@ export function unregisterShutdownHooksForTesting(): void {
   shutdownHooksRegistered = false;
 }
 
+export function isCompactionMessage(msg: Message): boolean {
+  const rawRole = (msg as unknown as Record<string, unknown>).role;
+  if (rawRole === "compactionSummary" || rawRole === "branchSummary") {
+    return true;
+  }
+  const raw = msg as unknown as Record<string, unknown>;
+  if (raw.customType === "compaction" || raw.customType === "branch_summary") {
+    return true;
+  }
+  if (typeof raw.summary === "string" && raw.tokensBefore !== undefined) {
+    return true;
+  }
+  if (raw.isCompaction === true) {
+    return true;
+  }
+  if (msg.role === "user") {
+    const text = contentText(msg.content);
+    if (
+      text.includes("The conversation history before this point was compacted") ||
+      text.includes("The following is a summary of a branch that this conversation came back from") ||
+      (text.includes("<summary>") &&
+        (text.includes("## Goal") ||
+          text.includes("## Progress") ||
+          text.includes("## Critical Context") ||
+          text.includes("<read-files>")))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export interface CompactionDetectionResult {
+  hasCompaction: boolean;
+  compactionIndex: number;
+  compactionMessage?: Message;
+  compactionTimestamp?: number;
+}
+
+/**
+ * Structural compaction detector from actual Pi projected context.
+ *
+ * Why this fallback exists:
+ * The extension lifecycle event `session_compact` is the authoritative signal,
+ * but it may not be observed when Pi restarts, the extension reloads, an old Pi
+ * session is resumed, or branch/tree navigation occurs. In those cases, this
+ * detector inspects the projected context messages for structural evidence of compaction.
+ */
+export function detectCompaction(
+  context: TranscriptContext | { messages?: Message[] },
+): CompactionDetectionResult {
+  const messages = context?.messages || [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (isCompactionMessage(m)) {
+      const rawTs = m.timestamp ?? (m as unknown as Record<string, unknown>).timestamp;
+      const compactionTimestamp = typeof rawTs === "number" ? rawTs : undefined;
+      return {
+        hasCompaction: true,
+        compactionIndex: i,
+        compactionMessage: m,
+        compactionTimestamp,
+      };
+    }
+  }
+  return {
+    hasCompaction: false,
+    compactionIndex: -1,
+  };
+}
+
+export function extractCompactionSummaryText(msg: Message): string {
+  const raw = msg as unknown as Record<string, unknown>;
+  const rawSummary = typeof raw.summary === "string" ? raw.summary.trim() : "";
+  const content = contentText(msg.content).trim();
+
+  if (content) {
+    return content;
+  }
+  if (rawSummary) {
+    return `${COMPACTION_SUMMARY_PREFIX}${rawSummary}${COMPACTION_SUMMARY_SUFFIX}`;
+  }
+  return "";
+}
+
+/**
+ * Extract authoritative system prompt from context, deduplicating context.systemPrompt
+ * and any projected system messages to ensure it appears exactly once.
+ */
+export function extractAuthoritativeSystemPrompt(
+  context: TranscriptContext | { systemPrompt?: string; messages?: Message[] },
+): string {
+  const parts: string[] = [];
+  const seen = new Set<string>();
+
+  const rawPrompt = (context as { systemPrompt?: string }).systemPrompt?.trim();
+  if (rawPrompt) {
+    parts.push(rawPrompt);
+    seen.add(rawPrompt);
+  }
+
+  const messages = context?.messages || [];
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      const text = contentText(msg.content).trim();
+      if (text && !seen.has(text)) {
+        parts.push(text);
+        seen.add(text);
+      }
+    }
+  }
+
+  return parts.join("\n\n");
+}
+
+export interface FindConversationOptions {
+  sessionId?: string;
+  isPostCompactionBootstrap?: boolean;
+}
+
 /**
  * Scan transcript backwards for an assistant message carrying the AGY conversation ID.
+ * Ignores stale pre-compaction assistant responseIds when compaction has occurred.
  */
-export function findConversationId(context: TranscriptContext): string | undefined {
+export function findConversationId(
+  context: TranscriptContext,
+  options?: FindConversationOptions,
+): string | undefined {
   if (!context?.messages) {
     return undefined;
   }
+
+  if (options?.isPostCompactionBootstrap) {
+    return undefined;
+  }
+
+  const sid = options?.sessionId ?? currentSessionId;
+  if (sid) {
+    const sState = sessionStates.get(sid);
+    if (sState?.needsBootstrap) {
+      return undefined;
+    }
+  }
+
+  const compaction = detectCompaction(context);
+
   for (let i = context.messages.length - 1; i >= 0; i--) {
     const msg = context.messages[i];
     if (msg.role === "assistant") {
       const assistantMsg = msg as AssistantMessage;
-      if (assistantMsg.responseId) {
-        return assistantMsg.responseId;
-      }
-      const raw = assistantMsg as unknown as Record<string, unknown>;
-      if (typeof raw.conversationId === "string" && raw.conversationId) {
-        return raw.conversationId;
+      const convId =
+        assistantMsg.responseId ||
+        (assistantMsg as unknown as Record<string, unknown>).conversationId;
+
+      if (typeof convId === "string" && convId) {
+        if (retiredConversationIds.has(convId)) {
+          continue;
+        }
+
+        if (!compaction.hasCompaction) {
+          return convId;
+        }
+
+        if (validPostCompactionConversations.has(convId)) {
+          return convId;
+        }
+
+        if (compaction.compactionTimestamp !== undefined) {
+          const msgTs =
+            assistantMsg.timestamp ??
+            (assistantMsg as unknown as Record<string, unknown>).timestamp;
+          if (typeof msgTs === "number") {
+            if (msgTs <= compaction.compactionTimestamp) {
+              continue;
+            } else {
+              return convId;
+            }
+          }
+        }
+
+        if (i <= compaction.compactionIndex) {
+          continue;
+        }
+
+        if (sid && sessionStates.get(sid)?.activeConversationId === convId) {
+          return convId;
+        }
+
+        continue;
       }
     }
   }
@@ -106,13 +362,49 @@ export function buildTurnPrompt(
     return lastText;
   }
 
-  // Fresh conversation: prepend system message if present
-  const systemTexts = messages
-    .filter((m) => m.role === "system")
-    .map((m) => contentText(m.content))
-    .filter(Boolean);
-  const systemPrompt = systemTexts.join("\n\n");
+  // Fresh conversation or bootstrap: extract system prompt exactly once
+  const systemPrompt = extractAuthoritativeSystemPrompt(context);
 
+  const compaction = detectCompaction(context);
+
+  if (compaction.hasCompaction && compaction.compactionIndex >= 0) {
+    // Bootstrap fresh AGY conversation from Pi's compacted projection:
+    // <System context>
+    // <Compaction summary>
+    // <Recent retained conversation>
+    // <Current request>
+    const parts: string[] = [];
+    if (systemPrompt) {
+      parts.push(systemPrompt);
+    }
+
+    const summaryText = extractCompactionSummaryText(compaction.compactionMessage!);
+    if (summaryText) {
+      parts.push(summaryText);
+    }
+
+    for (let i = compaction.compactionIndex + 1; i < messages.length - 1; i++) {
+      const msg = messages[i];
+      if (msg.role === "system" || msg.role === "toolResult") {
+        continue;
+      }
+      if (msg.role === "user" || msg.role === "assistant") {
+        const text = contentText(msg.content).trim();
+        if (text) {
+          const roleLabel = msg.role === "assistant" ? "Assistant" : "User";
+          parts.push(`${roleLabel}: ${text}`);
+        }
+      }
+    }
+
+    if (lastMsg && lastMsg !== compaction.compactionMessage && lastText) {
+      parts.push(lastText);
+    }
+
+    return parts.join("\n\n");
+  }
+
+  // Fresh conversation without compaction:
   if (nonSystem.length <= 1) {
     return systemPrompt ? `${systemPrompt}\n\n${lastText}`.trim() : lastText;
   }
@@ -299,6 +591,7 @@ export interface ExtendedStreamOptions extends SimpleStreamOptions {
   spawnFn?: typeof spawn;
   bin?: string;
   onProgress?: AgyProgressCallback;
+  sessionId?: string;
 }
 
 /**
@@ -360,9 +653,30 @@ export function streamSimple(
         throw new Error("Request was aborted");
       }
 
-      const conversationId = findConversationId(context);
-      let isResumed = false;
+      const activeSid = options?.sessionId ?? currentSessionId;
+      const sessionState = activeSid ? getSessionState(activeSid) : undefined;
 
+      const compaction = detectCompaction(context);
+      let isBootstrapTurn = Boolean(sessionState?.needsBootstrap);
+
+      if (!isBootstrapTurn && compaction.hasCompaction) {
+        const existingConvId = findConversationId(context, {
+          sessionId: activeSid,
+        });
+        if (!existingConvId) {
+          isBootstrapTurn = true;
+        }
+      }
+
+      if (isBootstrapTurn && activeSid && sessionState?.activeConversationId) {
+        retireSessionConversation(activeSid);
+      }
+
+      const conversationId = isBootstrapTurn
+        ? undefined
+        : findConversationId(context, { sessionId: activeSid });
+
+      let isResumed = false;
       const effort = resolveEffort(model.id, options);
 
       if (conversationId) {
@@ -425,6 +739,13 @@ export function streamSimple(
           if (init.conversation_id && proc) {
             const alreadyBound = activeProcesses.get(init.conversation_id) === proc;
             activeProcesses.set(init.conversation_id, proc);
+            validPostCompactionConversations.add(init.conversation_id);
+            if (activeSid) {
+              const sState = getSessionState(activeSid);
+              sState.activeConversationId = init.conversation_id;
+              sState.needsBootstrap = false;
+              conversationToSession.set(init.conversation_id, activeSid);
+            }
             if (!alreadyBound) {
               proc.once("exit", () => {
                 if (boundConversationId) {

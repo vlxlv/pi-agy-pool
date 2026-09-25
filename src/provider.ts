@@ -3,10 +3,14 @@ import type {
   ExtensionContext,
   ExtensionUIContext,
   ProviderModelConfig,
+  SessionCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
+  markSessionCompacted,
   resetActiveProcesses,
+  retireSessionConversation,
   setActiveProgressCallback,
+  setCurrentSessionId,
   streamSimple,
 } from "./stream.ts";
 
@@ -43,16 +47,24 @@ export function registerAgyPoolProvider(
   const baseUrl = options.baseUrl || DEFAULT_BASE_URL;
   const models = options.models || VERIFIED_MODELS;
 
-  // Use Pi session lifecycle hooks for child process cleanup and progress reporting
+  // Use Pi session lifecycle hooks for child process cleanup, progress reporting, and compaction
   if (typeof pi.on === "function") {
     let currentUI: ExtensionUIContext | undefined;
 
     pi.on("turn_start", (_event, ctx: ExtensionContext) => {
       currentUI = ctx?.ui;
+      const sid = ctx?.sessionManager?.getSessionId?.();
+      if (sid) {
+        setCurrentSessionId(sid);
+      }
     });
 
     pi.on("before_provider_request", (_event, ctx: ExtensionContext) => {
       currentUI = ctx?.ui;
+      const sid = ctx?.sessionManager?.getSessionId?.();
+      if (sid) {
+        setCurrentSessionId(sid);
+      }
     });
 
     pi.on("turn_end", (_event, ctx: ExtensionContext) => {
@@ -62,8 +74,33 @@ export function registerAgyPoolProvider(
       currentUI = undefined;
     });
 
+    pi.on("session_compact", (_event: SessionCompactEvent, ctx: ExtensionContext) => {
+      const sid = ctx?.sessionManager?.getSessionId?.() || "default";
+      markSessionCompacted(sid);
+    });
+
+    pi.on("session_before_switch", (_event, ctx: ExtensionContext) => {
+      const sid = ctx?.sessionManager?.getSessionId?.() || "default";
+      retireSessionConversation(sid);
+    });
+
+    pi.on("session_before_fork", (_event, ctx: ExtensionContext) => {
+      const sid = ctx?.sessionManager?.getSessionId?.() || "default";
+      retireSessionConversation(sid);
+    });
+
+    pi.on("session_tree", (_event, ctx: ExtensionContext) => {
+      const sid = ctx?.sessionManager?.getSessionId?.() || "default";
+      retireSessionConversation(sid);
+    });
+
     pi.on("session_shutdown", (_event, ctx?: ExtensionContext) => {
-      resetActiveProcesses();
+      const sid = ctx?.sessionManager?.getSessionId?.();
+      if (sid) {
+        retireSessionConversation(sid);
+      } else {
+        resetActiveProcesses();
+      }
       if (typeof ctx?.ui?.setWorkingMessage === "function") {
         ctx.ui.setWorkingMessage(undefined);
       }
