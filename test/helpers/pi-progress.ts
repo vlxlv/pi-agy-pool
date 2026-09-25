@@ -28,9 +28,10 @@ export class FakeAgy extends EventEmitter {
   stderr = new PassThrough();
   killed = false;
   turns = 0;
+  inputs: string[] = [];
   constructor() {
     super();
-    this.stdin.on("data", () => this.turns++);
+    this.stdin.on("data", data => { this.turns++; this.inputs.push(JSON.parse(data.toString()).message.content); });
   }
   kill(signal = "SIGTERM") {
     this.killed = true;

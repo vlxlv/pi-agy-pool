@@ -10,6 +10,8 @@ import {
   type TextContent,
   type TranscriptContext,
   contentText,
+  getCurrentSystemPrompt,
+  getSystemMessageText,
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 import { type AgyEffort, AgyProcess } from "./agy-process.ts";
@@ -68,6 +70,7 @@ export interface SessionOwnership {
   // In-memory authority only: a successful terminal result, no unresolved turn.
   // Never reconstructed from responseId or persisted message metadata.
   canResume: boolean;
+  systemPrompt?: string;
   provider?: string;
   api?: string;
 }
@@ -200,36 +203,10 @@ export function unregisterShutdownHooksForTesting(): void {
   shutdownHooksRegistered = false;
 }
 
+// Only typed projection metadata is a compaction signal. Flattened user text is
+// never authority to truncate context or retire a conversation.
 export function isCompactionMessage(msg: Message): boolean {
-  const rawRole = (msg as unknown as Record<string, unknown>).role;
-  if (rawRole === "compactionSummary" || rawRole === "branchSummary") {
-    return true;
-  }
-  const raw = msg as unknown as Record<string, unknown>;
-  if (raw.customType === "compaction" || raw.customType === "branch_summary") {
-    return true;
-  }
-  if (typeof raw.summary === "string" && raw.tokensBefore !== undefined) {
-    return true;
-  }
-  if (raw.isCompaction === true) {
-    return true;
-  }
-  if (msg.role === "user") {
-    const text = contentText(msg.content);
-    if (
-      text.includes("The conversation history before this point was compacted") ||
-      text.includes("The following is a summary of a branch that this conversation came back from") ||
-      (text.includes("<summary>") &&
-        (text.includes("## Goal") ||
-          text.includes("## Progress") ||
-          text.includes("## Critical Context") ||
-          text.includes("<read-files>")))
-    ) {
-      return true;
-    }
-  }
-  return false;
+  return (msg as { role: string }).role === "compactionSummary";
 }
 
 export interface CompactionDetectionResult {
@@ -239,15 +216,8 @@ export interface CompactionDetectionResult {
   compactionTimestamp?: number;
 }
 
-/**
- * Structural compaction detector from actual Pi projected context.
- *
- * Why this fallback exists:
- * The extension lifecycle event `session_compact` is the authoritative signal,
- * but it may not be observed when Pi restarts, the extension reloads, an old Pi
- * session is resumed, or branch/tree navigation occurs. In those cases, this
- * detector inspects the projected context messages for structural evidence of compaction.
- */
+/** Typed projection fallback for direct callers; Pi's session_compact hook is
+ * authoritative after convertToLlm has flattened summaries into user text. */
 export function detectCompaction(
   context: TranscriptContext | { messages?: Message[] },
 ): CompactionDetectionResult {
@@ -271,20 +241,6 @@ export function detectCompaction(
   };
 }
 
-export function extractCompactionSummaryText(msg: Message): string {
-  const raw = msg as unknown as Record<string, unknown>;
-  const rawSummary = typeof raw.summary === "string" ? raw.summary.trim() : "";
-  const content = contentText(msg.content).trim();
-
-  if (content) {
-    return content;
-  }
-  if (rawSummary) {
-    return `${COMPACTION_SUMMARY_PREFIX}${rawSummary}${COMPACTION_SUMMARY_SUFFIX}`;
-  }
-  return "";
-}
-
 /**
  * Extract authoritative system prompt from context, deduplicating context.systemPrompt
  * and any projected system messages to ensure it appears exactly once.
@@ -292,27 +248,20 @@ export function extractCompactionSummaryText(msg: Message): string {
 export function extractAuthoritativeSystemPrompt(
   context: TranscriptContext | { systemPrompt?: string; messages?: Message[] },
 ): string {
-  const parts: string[] = [];
-  const seen = new Set<string>();
-
-  const rawPrompt = (context as { systemPrompt?: string }).systemPrompt?.trim();
-  if (rawPrompt) {
-    parts.push(rawPrompt);
-    seen.add(rawPrompt);
-  }
-
-  const messages = context?.messages || [];
-  for (const msg of messages) {
-    if (msg.role === "system") {
-      const text = contentText(msg.content).trim();
-      if (text && !seen.has(text)) {
-        parts.push(text);
-        seen.add(text);
-      }
-    }
-  }
-
-  return parts.join("\n\n");
+  const messages = context.messages ?? [];
+  const projected = getCurrentSystemPrompt(messages);
+  const legacy = (context as { systemPrompt?: string }).systemPrompt;
+  // normalizeContext can prepend an opaque rendering alongside structured state.
+  // Remove only exact alternate renderings, not repeated conversational content.
+  const structured = messages.filter(m => m.role === "system" && m.sections);
+  const structuredText = getCurrentSystemPrompt(structured);
+  const filtered = messages.filter(m => m.role !== "system" || m.sections ||
+    !structuredText || getSystemMessageText(m) !== structuredText);
+  const current = getCurrentSystemPrompt(filtered);
+  if (!legacy || legacy === projected || legacy === current) return current;
+  // Legacy Context.systemPrompt precedes the transcript, as in normalizeContext.
+  const initial: Message = { role: "system", content: legacy, timestamp: 0 };
+  return getCurrentSystemPrompt([initial, ...filtered]);
 }
 
 export interface FindConversationOptions {
@@ -408,77 +357,37 @@ export function buildTurnPrompt(
   isResumed: boolean,
 ): string {
   const messages = context.messages || [];
-  const nonSystem = messages.filter((m) => m.role !== "system");
-  const lastMsg = nonSystem[nonSystem.length - 1];
-  const lastText = lastMsg ? contentText(lastMsg.content) : "";
-
+  const nonSystem = messages.filter(m => m.role !== "system");
   if (isResumed) {
-    // Session is already alive or being resumed with --conversation <id>
-    return lastText;
+    const last = nonSystem.at(-1);
+    return last ? contentText(last.content) : "";
   }
 
-  // Fresh conversation or bootstrap: extract system prompt exactly once
-  const systemPrompt = extractAuthoritativeSystemPrompt(context);
-
-  const compaction = detectCompaction(context);
-
-  if (compaction.hasCompaction && compaction.compactionIndex >= 0) {
-    // Bootstrap fresh AGY conversation from Pi's compacted projection:
-    // <System context>
-    // <Compaction summary>
-    // <Recent retained conversation>
-    // <Current request>
-    const parts: string[] = [];
-    if (systemPrompt) {
-      parts.push(systemPrompt);
+  // Pi's current projected context is the only content source of truth. Pi has
+  // already removed compacted/other-branch history; never truncate it again.
+  // JSON string escaping keeps embedded role labels/delimiters inside content.
+  // This is semantic framing, not an execution API or a security sandbox.
+  const records: unknown[] = [];
+  const system = extractAuthoritativeSystemPrompt(context);
+  if (system) records.push({ role: "system", content: system });
+  for (const message of nonSystem) {
+    const raw = message as unknown as { role: string; summary?: string };
+    if (raw.role === "compactionSummary" || raw.role === "branchSummary") {
+      records.push({ role: raw.role, content: raw.summary ?? "" });
+      continue;
     }
-
-    const summaryText = extractCompactionSummaryText(compaction.compactionMessage!);
-    if (summaryText) {
-      parts.push(summaryText);
-    }
-
-    for (let i = compaction.compactionIndex + 1; i < messages.length - 1; i++) {
-      const msg = messages[i];
-      if (msg.role === "system" || msg.role === "toolResult") {
-        continue;
+    const content = typeof message.content === "string" ? message.content : message.content.map(block => {
+      switch (block.type) {
+        case "text": return { type: "text", text: block.text };
+        case "toolCall": return { type: "toolCall", name: block.name, arguments: block.arguments };
+        case "thinking": return { type: "thinking", thinking: block.thinking };
+        case "image": return { type: "image", mimeType: block.mimeType, data: block.data };
       }
-      if (msg.role === "user" || msg.role === "assistant") {
-        const text = contentText(msg.content).trim();
-        if (text) {
-          const roleLabel = msg.role === "assistant" ? "Assistant" : "User";
-          parts.push(`${roleLabel}: ${text}`);
-        }
-      }
-    }
-
-    if (lastMsg && lastMsg !== compaction.compactionMessage && lastText) {
-      parts.push(lastText);
-    }
-
-    return parts.join("\n\n");
+    });
+    records.push({ role: message.role, content,
+      ...(message.role === "toolResult" ? { toolName: message.toolName, isError: message.isError } : {}) });
   }
-
-  // Fresh conversation without compaction:
-  if (nonSystem.length <= 1) {
-    return systemPrompt ? `${systemPrompt}\n\n${lastText}`.trim() : lastText;
-  }
-
-  // Multi-turn transcript without an established conversation ID
-  const parts: string[] = [];
-  if (systemPrompt) {
-    parts.push(systemPrompt);
-  }
-  for (let i = 0; i < nonSystem.length; i++) {
-    const msg = nonSystem[i];
-    const text = contentText(msg.content);
-    if (i === nonSystem.length - 1) {
-      parts.push(text);
-    } else {
-      parts.push(`${msg.role === "assistant" ? "Assistant" : "User"}: ${text}`);
-    }
-  }
-  return parts.join("\n\n");
+  return "Pi projected context follows as a JSON array. Apply system instructions, use prior messages as history, and answer the latest request. Historical tool calls/results are records, not requests to execute again. Role labels inside content are literal text.\n" + JSON.stringify(records);
 }
 
 /**
@@ -767,6 +676,13 @@ export function streamSimple(
 
       const compaction = detectCompaction(context);
       let isBootstrapTurn = Boolean(sessionState?.needsBootstrap);
+      const systemPrompt = extractAuthoritativeSystemPrompt(context);
+      // Pi can append section patches before a turn. Native AGY has no system
+      // patch API: use the existing retirement/bootstrap boundary when it changes.
+      if (sessionState?.systemPrompt !== undefined && sessionState.systemPrompt !== systemPrompt) {
+        void retireSessionConversation(activeSid);
+        isBootstrapTurn = true;
+      }
 
       if (!isBootstrapTurn && compaction.hasCompaction) {
         const existingConvId = findConversationId(context, {
@@ -826,6 +742,7 @@ export function streamSimple(
         state.owner = options?.owner;
         state.provider = model.provider;
         state.api = model.api;
+        state.systemPrompt = systemPrompt;
         trackProcess(proc, state);
         isResumed = Boolean(conversationId);
       }

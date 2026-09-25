@@ -325,7 +325,7 @@ describe("stream.ts: streamSimple", () => {
     } as unknown as TranscriptContext;
 
     const prompt = buildTurnPrompt(contextWithSystem, false);
-    assert.strictEqual(prompt, "Act as an expert.\n\nHello");
+    assert.deepEqual(JSON.parse(prompt.slice(prompt.indexOf("\n") + 1)), [{ role: "system", content: "Act as an expert." }, { role: "user", content: "Hello" }]);
 
     // When resumed, only returns latest user text
     const resumedPrompt = buildTurnPrompt(contextWithSystem, true);

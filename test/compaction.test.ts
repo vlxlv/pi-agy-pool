@@ -300,15 +300,15 @@ describe("Compaction Support", () => {
     const prompt = buildTurnPrompt(context, false);
 
     // 6. Compacted summary is included
-    assert.ok(prompt.includes("## Goal\nBuild something great"));
+    assert.ok(prompt.includes("## Goal\\nBuild something great"));
     assert.ok(prompt.includes("Codename: ORBITAL-MANGO-7391"));
 
     // 7. Removed pre-compaction messages are absent (they never entered context)
     assert.ok(!prompt.includes("Removed Turn"));
 
     // 8. Kept recent messages appear exactly once
-    const keptUserCount = (prompt.match(/User: Kept user message/g) || []).length;
-    const keptAssistantCount = (prompt.match(/Assistant: Kept assistant response/g) || []).length;
+    const keptUserCount = (prompt.match(/Kept user message/g) || []).length;
+    const keptAssistantCount = (prompt.match(/Kept assistant response/g) || []).length;
     assert.strictEqual(keptUserCount, 1, "Kept user message must appear exactly once");
     assert.strictEqual(keptAssistantCount, 1, "Kept assistant message must appear exactly once");
 
@@ -488,8 +488,8 @@ describe("Compaction Support", () => {
     const contextWithCompaction: TranscriptContext = {
       messages: [
         {
-          role: "user",
-          content: `${COMPACTION_SUMMARY_PREFIX}## Goal\nPreserve context\n${COMPACTION_SUMMARY_SUFFIX}`,
+          role: "compactionSummary",
+          summary: "Preserve context",
           timestamp: 500,
         },
         {
