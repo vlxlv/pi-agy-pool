@@ -6,7 +6,7 @@ Pi 0.87.1 is the source of truth, not the full session tree or historical AGY ID
   system content plus sections (preamble, project files including AGENTS.md,
   skills, cwd and extension instructions). `pi-ai` public
   `getCurrentSystemPrompt` replays section patches and removals, then renders
-  them. Opaque equivalent renderings are not added a second time.
+  them. Independent opaque contributions remain exactly as Pi renders them.
 - `pi-ai:normalizeContext` folds legacy systemPrompt into transcript messages.
 - `core/session-manager.js:buildSessionProjection` selects the current branch,
   applies context edits, excludes compacted history, and retains recent items.
@@ -37,26 +37,26 @@ Tests use actual Pi system/projection, fork/tree, persistence/restart and
 compaction machinery, with fake AGY subprocesses and inspected stdin. Native
 AGY testing is intentionally not performed in WSL.
 
-## CP3.1 correlation and canonical system state
+## CP3.2 occurrence references and authoritative system state
 
-A bootstrap-local map assigns `call_1`, `call_2`, ... to retained assistant
-calls in projection order across all batches. Results use the matching `ref`.
-Only raw Pi call IDs drive matching, never names/order/result text. Results
-without a retained call receive an additional reference and `orphaned: true`;
-orphan calls remain historical records. Nothing executes these records.
-The map is discarded after serialization and never reads process/session state.
+Pi 0.87.1 `pi-ai/api/transform-messages.js` tracks pending calls in the current
+assistant batch. An assistant or user message closes the previous batch;
+system messages are transparent. The agent loop emits results for each batch,
+but projection edits can remove arbitrary calls/results. Raw IDs are not
+transcript-global identities.
 
-System precedence is structured Pi state replay first, with independent opaque
-updates retained. Compatibility aliases are exact full renderings or Pi's
-named `preamble`, not arbitrary matching lines or independently named sections.
-The initial structured state also identifies a legacy alias when later section
-patches replace/delete it. A separate legacy `context.systemPrompt` is added
-only when not represented by that state or an opaque message.
+Each retained call occurrence receives a new bootstrap-global `call_N` ref.
+Results match only a unique raw ID in the current retained assistant batch.
+Repeated IDs within that batch, missing calls, and results after a user boundary
+are ambiguous: each receives a separate ref and `orphaned: true`. Calls in later
+batches cannot capture earlier results. Failed/aborted assistant batches cannot
+establish result associations. Nothing synthesizes results or executes records.
 
-`normalizeContext` loses the original legacy field and prepends a timestamp-zero
-system header. In that leading compatibility prefix only, an exact structured
-alias or duplicate adjacent timestamp-zero opaque header is removed. This is
-an explicit normalization convention, not proof of authorship inferred from
-text. Later opaque updates and distinct sections with identical text remain.
-The same canonicalization function feeds both bootstrap and system-change
-retirement. No general paragraph deduplication or semantic NLP is used.
+System state is exactly `getCurrentSystemPrompt(normalizeContext(context).messages)`.
+The public normalizer also covers direct/legacy callers with `systemPrompt`:
+Pi prepends that contribution; it does not establish an alias. No timestamp,
+text equality, or filtered-position heuristic removes content. If Pi renders
+BASE twice, bootstrap preserves both copies. The full ordered projection is
+passed to Pi, including conversational boundaries. This same function drives
+bootstrap and system-change retirement; equivalent rendered strings reuse the
+process, changed strings force fresh bootstrap. There is no second system path.

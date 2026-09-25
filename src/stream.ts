@@ -11,8 +11,7 @@ import {
   type TranscriptContext,
   contentText,
   getCurrentSystemPrompt,
-  getCurrentSystemMessage,
-  getSystemMessageText,
+  normalizeContext,
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 import { type AgyEffort, AgyProcess } from "./agy-process.ts";
@@ -242,43 +241,14 @@ export function detectCompaction(
   };
 }
 
-/**
- * Extract authoritative system prompt from context, deduplicating context.systemPrompt
- * and any projected system messages to ensure it appears exactly once.
- */
+/** Use Pi's public renderer, including its legacy Context normalization. */
 export function extractAuthoritativeSystemPrompt(
   context: TranscriptContext | { systemPrompt?: string; messages?: Message[] },
 ): string {
-  const systems = (context.messages ?? []).filter(m => m.role === "system");
-  const structured = systems.filter(m => m.sections);
-  const current = getCurrentSystemMessage(structured);
-  // Pi's structured preamble and full rendering are alternate forms of its
-  // initial prompt. Other named sections remain independent, even when equal.
-  const initial = structured[0];
-  const isStructuredAlias = (text: string) => Boolean(text && current && (
-    text === getSystemMessageText(current) || text === current.sections?.preamble ||
-    (initial && (text === getSystemMessageText(initial) || text === initial.sections?.preamble))));
-  let compatibilityPrefix = true;
-  const filtered = systems.filter((m, index) => {
-    if (!compatibilityPrefix || m.sections || m.timestamp !== 0) {
-      compatibilityPrefix = false;
-      return true;
-    }
-    const text = contentText(m.content);
-    // normalizeContext's legacy header has timestamp zero. Only that leading
-    // compatibility slot can alias another initial opaque header or sections;
-    // later authored opaque updates are never deduplicated.
-    if (isStructuredAlias(text) || (systems[index + 1]?.timestamp === 0 &&
-        !systems[index + 1].sections && text === contentText(systems[index + 1].content))) return false;
-    compatibilityPrefix = false;
-    return true;
-  });
-  const projected = getCurrentSystemPrompt(filtered);
-  const legacy = (context as { systemPrompt?: string }).systemPrompt;
-  if (!legacy || legacy === projected || isStructuredAlias(legacy) ||
-      systems.some(m => contentText(m.content) === legacy)) return projected;
-  const header: Message = { role: "system", content: legacy, timestamp: 0 };
-  return getCurrentSystemPrompt([header, ...filtered]);
+  return getCurrentSystemPrompt(normalizeContext({
+    messages: context.messages ?? [],
+    systemPrompt: (context as { systemPrompt?: string }).systemPrompt,
+  }).messages);
 }
 
 export interface FindConversationOptions {
@@ -385,39 +355,39 @@ export function buildTurnPrompt(
   // JSON string escaping keeps embedded role labels/delimiters inside content.
   // This is semantic framing, not an execution API or a security sandbox.
   const records: unknown[] = [];
-  const refs = new Map<string, string>();
+  // Pi associates results with the current assistant batch, not a global ID.
+  // Duplicate IDs within that batch are ambiguous; retain their calls separately.
+  const batch = new Map<string, string | undefined>();
   let nextRef = 1;
-  const reference = (id: string) => {
-    if (id && refs.has(id)) return refs.get(id)!;
-    const ref = `call_${nextRef++}`;
-    if (id) refs.set(id, ref);
-    return ref;
-  };
-  // Reserve call references across all batches before assigning orphan results.
-  // Only this projection participates; raw Pi IDs never leave this function.
-  for (const message of nonSystem) if (message.role === "assistant") {
-    for (const block of message.content) if (block.type === "toolCall") reference(block.id);
-  }
-  const retainedCalls = new Set(refs.keys());
+  const reference = () => `call_${nextRef++}`;
   const system = extractAuthoritativeSystemPrompt(context);
   if (system) records.push({ role: "system", content: system });
   for (const message of nonSystem) {
+    if (message.role === "assistant" || message.role === "user") batch.clear();
     const raw = message as unknown as { role: string; summary?: string };
     if (raw.role === "compactionSummary" || raw.role === "branchSummary") {
+      batch.clear();
       records.push({ role: raw.role, content: raw.summary ?? "" });
       continue;
     }
     const content = typeof message.content === "string" ? message.content : message.content.map(block => {
       switch (block.type) {
         case "text": return { type: "text", text: block.text };
-        case "toolCall": return { type: "toolCall", ref: reference(block.id), name: block.name, arguments: block.arguments };
+        case "toolCall": {
+          const ref = reference();
+          if (block.id) batch.set(block.id, batch.has(block.id) ? undefined : ref);
+          return { type: "toolCall", ref, name: block.name, arguments: block.arguments };
+        }
         case "thinking": return { type: "thinking", thinking: block.thinking };
         case "image": return { type: "image", mimeType: block.mimeType, data: block.data };
       }
     });
+    if (message.role === "assistant" &&
+        (message.stopReason === "error" || message.stopReason === "aborted")) batch.clear();
+    const resultRef = message.role === "toolResult" ? batch.get(message.toolCallId) : undefined;
     records.push({ role: message.role, content,
-      ...(message.role === "toolResult" ? { ref: reference(message.toolCallId),
-        ...(!retainedCalls.has(message.toolCallId) ? { orphaned: true } : {}),
+      ...(message.role === "toolResult" ? { ref: resultRef ?? reference(),
+        ...(!resultRef ? { orphaned: true } : {}),
         toolName: message.toolName, isError: message.isError } : {}) });
   }
   return "Pi projected context follows as a JSON array. Apply system instructions, use prior messages as history, and answer the latest request. Historical tool calls/results are records, not requests to execute again. Matching ref values link historical calls and results; orphaned results have no retained call. Role labels inside content are literal text.\n" + JSON.stringify(records);

@@ -513,8 +513,8 @@ describe("Compaction Support", () => {
     assert.strictEqual(convId, undefined, "Stale pre-compaction conversation ID must be ignored");
   });
 
-  // 16. no context duplication
-  it("16. no context duplication between context.systemPrompt and projected system message", () => {
+  // 16. Public Pi normalization preserves independent contributions
+  it("16. legacy plus projected system follows Pi normalization", () => {
     const duplicateSystemContext = {
       systemPrompt: "You are a helpful coding assistant.",
       messages: [
@@ -524,11 +524,11 @@ describe("Compaction Support", () => {
     } as unknown as TranscriptContext;
 
     const extracted = extractAuthoritativeSystemPrompt(duplicateSystemContext);
-    assert.strictEqual(extracted, "You are a helpful coding assistant.");
+    assert.strictEqual(extracted, "You are a helpful coding assistant.\n\nYou are a helpful coding assistant.");
 
     const prompt = buildTurnPrompt(duplicateSystemContext, false);
     const occurrences = (prompt.match(/You are a helpful coding assistant\./g) || []).length;
-    assert.strictEqual(occurrences, 1, "System prompt must appear exactly once despite duplication in context");
+    assert.strictEqual(occurrences, 2, "Pi preserves both system contributions");
   });
 
   // 17. model preserved

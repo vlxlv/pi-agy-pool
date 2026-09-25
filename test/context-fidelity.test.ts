@@ -15,11 +15,12 @@ function once(text: string, marker: string) { assert.equal(text.split(marker).le
 function projected(s: any) {return normalizeContext({messages:convertToLlm(s.buildSessionProjection().messages)});}
 function records(prompt: string): any[] { return JSON.parse(prompt.slice(prompt.indexOf("\n")+1)); }
 afterEach(() => resetActiveProcesses());
-test("CP3 actual Pi structured system and aliases appear once",()=>{
+test("CP3 actual Pi structured system matches public renderer",()=>{
  const rendered=getCurrentSystemPrompt([system]);
  for(const context of [normalizeContext({messages:[system,user("LATEST_MARK")]}),{systemPrompt:rendered,messages:[{role:"system",content:rendered,timestamp:0},system,user("LATEST_MARK")]}]) {
   const p=buildTurnPrompt(context as any,false);
-  for(const marker of ["PREAMBLE_MARK","CWD_MARK","AGENTS_MARK","PROJECT_MARK","LATEST_MARK"])once(p,marker);
+  assert.equal(records(p)[0].content,getCurrentSystemPrompt(normalizeContext(context as any).messages));
+  once(p,"LATEST_MARK");
  }
 });
 test("CP3 system patches use actual Pi current state",()=>{

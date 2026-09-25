@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeContext } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt, normalizeContext } from "@earendil-works/pi-ai";
 import { setImmediate as tick } from "node:timers/promises";
 import { MODELS, API_IDENTIFIER } from "../src/models.ts";
 import { streamSimple, resetActiveProcesses } from "../src/stream.ts";
@@ -40,21 +40,21 @@ test("CP3.1 correlation: seeded subset edits 100 cases",()=>{
 test("CP3.1 correlation: identical projection serializes identically 100 times",()=>{const c=projection([2],[1,4]);verify(c);const expected=buildTurnPrompt(c,false);for(let i=0;i<100;i++)assert.equal(buildTurnPrompt(structuredClone(c),false),expected);});
 const sys=(content:string,sections?:any):any=>({role:"system",content,sections,timestamp:0});
 for(const normalized of [false,true])test(`CP3.1 system: legacy/opaque overlap normalized=${normalized}`,()=>{
- const c={systemPrompt:"BASE",messages:[sys("BASE"),sys("EXTRA")]};assert.equal(extractAuthoritativeSystemPrompt(normalized?normalizeContext(c):c),"BASE\n\nEXTRA");
+ const c={systemPrompt:"BASE",messages:[sys("BASE"),sys("EXTRA")]};assert.equal(extractAuthoritativeSystemPrompt(normalized?normalizeContext(c):c),getCurrentSystemPrompt(normalizeContext(c).messages));
 });
 test("CP3.1 system: legacy/sections overlap and full equivalent rendering",()=>{
- const s=sys("",{preamble:"BASE",extra:"EXTRA"});for(const legacy of ["BASE","BASE\n\nEXTRA"])for(const normalize of [false,true]){const c={systemPrompt:legacy,messages:[s]};assert.equal(extractAuthoritativeSystemPrompt(normalize?normalizeContext(c):c),"BASE\n\nEXTRA");}
+ const s=sys("",{preamble:"BASE",extra:"EXTRA"});for(const legacy of ["BASE","BASE\n\nEXTRA"])for(const normalize of [false,true]){const c={systemPrompt:legacy,messages:[s]};assert.equal(extractAuthoritativeSystemPrompt(normalize?normalizeContext(c):c),getCurrentSystemPrompt(normalizeContext(c).messages));}
 });
-test("CP3.1 system: normalized legacy plus opaque plus sections is one representation",()=>{
+test("CP3.1 system: normalized legacy plus opaque plus sections follows Pi rendering",()=>{
  const context=normalizeContext({systemPrompt:"BASE\n\nEXTRA",messages:[sys("BASE\n\nEXTRA"),sys("",{preamble:"BASE",extra:"EXTRA"})]});
- assert.equal(extractAuthoritativeSystemPrompt(context),"BASE\n\nEXTRA");
+ assert.equal(extractAuthoritativeSystemPrompt(context),getCurrentSystemPrompt(context.messages));
 });
 test("CP3.1 system: independent repeated sections and opaque updates are retained",()=>{
  assert.equal(extractAuthoritativeSystemPrompt({messages:[sys("",{a:"Always test.",b:"Always test."})]}),"Always test.\n\nAlways test.");
  assert.equal(extractAuthoritativeSystemPrompt({messages:[sys("FIRST"),{...sys("FIRST"),timestamp:2}]}),"FIRST\n\nFIRST");
 });
 test("CP3.1 system: section update/delete with a legacy alias",()=>{
- const c=normalizeContext({systemPrompt:"BASE",messages:[sys("",{preamble:"BASE",extra:"EXTRA"}),sys("",{preamble:"NEW",extra:null})]});assert.equal(extractAuthoritativeSystemPrompt(c),"NEW");
+ const c=normalizeContext({systemPrompt:"BASE",messages:[sys("",{preamble:"BASE",extra:"EXTRA"}),sys("",{preamble:"NEW",extra:null})]});assert.equal(extractAuthoritativeSystemPrompt(c),getCurrentSystemPrompt(c.messages));
 });
 
 test("CP3.1 system: canonical equivalence reuses; patch/delete retires; stable state reuses",async()=>{
@@ -64,8 +64,8 @@ test("CP3.1 system: canonical equivalence reuses; patch/delete retires; stable s
  const initial=sys("",{preamble:"BASE",extra:"EXTRA"});let history:any[]=[];
  async function turn(systems:any[]){const before=children.length;const context=normalizeContext({messages:[...systems,...history,{role:"user",content:"LATEST",timestamp:5}]});const r=streamSimple(model,context,{sessionId:"canon",spawnFn});const c=children.at(-1)!;if(children.length>before)c.send({event:"init",conversation_id:`N${children.length}`});await tick();c.result();history.push(await r.result());}
  try {
-  await turn([sys("BASE"),initial]);assert.equal(children.length,1);
   await turn([initial]);assert.equal(children.length,1);
+  await turn([sys("BASE\n\nEXTRA")]);assert.equal(children.length,1);
   const updated=[initial,sys("",{extra:"NEW"})];await turn(updated);assert.equal(children.length,2);assert(!args[1].includes("--conversation"));assert.equal(JSON.parse(children[1].inputs[0].split("\n").slice(1).join("\n"))[0].content,"BASE\n\nNEW");
   await turn(updated);assert.equal(children.length,2);
   await turn([...updated,sys("",{extra:null})]);assert.equal(children.length,3);assert(!args[2].includes("--conversation"));
