@@ -110,6 +110,8 @@ export function resetActiveProcesses(): void {
   conversationToSession.clear();
   retiredConversationIds.clear();
   validPostCompactionConversations.clear();
+  sessionProgressCallbacks.clear();
+  globalProgressCallback = undefined;
   currentSessionId = undefined;
 }
 
@@ -346,6 +348,18 @@ export function findConversationId(
 }
 
 /**
+ * Scan transcript backwards for an assistant message with an AGY conversation ID,
+ * then resolve the associated Pi session ID if known.
+ */
+export function findSessionId(context: TranscriptContext): string | undefined {
+  const convId = findConversationId(context);
+  if (convId) {
+    return conversationToSession.get(convId);
+  }
+  return undefined;
+}
+
+/**
  * Construct turn prompt for the official AGY stream-json input.
  */
 export function buildTurnPrompt(
@@ -487,6 +501,25 @@ export function resolveEffort(
 
 export type AgyProgressCallback = (message?: string) => void;
 
+export const sessionProgressCallbacks = new Map<string, AgyProgressCallback>();
+
+export function setSessionProgressCallback(
+  sessionId: string,
+  callback?: AgyProgressCallback,
+): void {
+  if (callback) {
+    sessionProgressCallbacks.set(sessionId, callback);
+  } else {
+    sessionProgressCallbacks.delete(sessionId);
+  }
+}
+
+export function getSessionProgressCallback(
+  sessionId: string,
+): AgyProgressCallback | undefined {
+  return sessionProgressCallbacks.get(sessionId);
+}
+
 let globalProgressCallback: AgyProgressCallback | undefined;
 
 export function setActiveProgressCallback(callback?: AgyProgressCallback): void {
@@ -497,46 +530,109 @@ export function getActiveProgressCallback(): AgyProgressCallback | undefined {
   return globalProgressCallback;
 }
 
+/**
+ * Stateful progress adapter ensuring:
+ * - One live status message that updates on transitions.
+ * - Repeated identical messages are deduplicated.
+ * - Progress row clears while text streams and resumes on later tools.
+ */
+export class AgyProgressAdapter {
+  private currentMessage: string | undefined = undefined;
+  private readonly callback: AgyProgressCallback;
+
+  constructor(callback?: AgyProgressCallback) {
+    this.callback = callback ?? (() => {});
+  }
+
+  update(message?: string): void {
+    if (message !== this.currentMessage) {
+      this.currentMessage = message;
+      try {
+        this.callback(message);
+      } catch {
+        // Safe no-op on handler errors
+      }
+    }
+  }
+
+  clear(): void {
+    this.update(undefined);
+  }
+
+  getCurrentMessage(): string | undefined {
+    return this.currentMessage;
+  }
+}
+
 export function formatToolProgress(toolName?: string): string {
   if (!toolName) {
     return "AGY: Running tool…";
   }
-  const normalized = toolName.toLowerCase().replace(/[-_]/g, "");
-  switch (normalized) {
-    case "viewfile":
-    case "readfile":
-    case "read":
-      return "AGY: Reading file…";
-    case "runcommand":
-    case "bash":
-    case "terminal":
-    case "shell":
-      return "AGY: Running command…";
-    case "searchweb":
-    case "websearch":
-      return "AGY: Searching…";
-    case "codesearch":
-    case "searchcode":
-    case "grep":
-    case "find":
-      return "AGY: Searching code…";
-    case "editfile":
-    case "replacefilecontent":
-    case "edit":
-      return "AGY: Editing file…";
-    case "writetofile":
-    case "writefile":
-    case "write":
-      return "AGY: Writing file…";
-    case "listdir":
-    case "listdirectory":
-    case "directoryanalysis":
-      return "AGY: Inspecting directory…";
-    case "invokesubagent":
-      return "AGY: Running subagent…";
-    default:
-      return `AGY: Running ${toolName}…`;
+  const toolLower = toolName.toLowerCase();
+  const normalized = toolLower.replace(/[-_]/g, "");
+
+  if (
+    toolLower === "view_file" ||
+    toolLower === "read_file" ||
+    normalized === "viewfile" ||
+    normalized === "readfile" ||
+    normalized === "read"
+  ) {
+    return "AGY: Reading file…";
   }
+
+  if (
+    toolLower === "run_command" ||
+    toolLower === "bash" ||
+    toolLower === "shell" ||
+    normalized === "runcommand" ||
+    normalized === "bash" ||
+    normalized === "shell" ||
+    normalized === "terminal"
+  ) {
+    return "AGY: Running command…";
+  }
+
+  if (
+    toolLower.startsWith("search") ||
+    normalized.startsWith("search") ||
+    normalized === "websearch" ||
+    normalized === "codesearch" ||
+    normalized === "grep" ||
+    normalized === "find"
+  ) {
+    return "AGY: Searching…";
+  }
+
+  if (
+    toolLower.startsWith("edit") ||
+    normalized.startsWith("edit") ||
+    normalized === "replacefilecontent"
+  ) {
+    return "AGY: Editing file…";
+  }
+
+  if (
+    toolLower.startsWith("write") ||
+    normalized.startsWith("write")
+  ) {
+    return "AGY: Writing file…";
+  }
+
+  if (
+    normalized === "listdir" ||
+    normalized === "listdirectory" ||
+    normalized === "directoryanalysis"
+  ) {
+    return "AGY: Inspecting directory…";
+  }
+
+  if (normalized === "invokesubagent") {
+    return "AGY: Running subagent…";
+  }
+
+  const safeName = toolName.replace(/[^\w-]/g, "").slice(0, 30);
+  return safeName ? `AGY: Running ${safeName}…` : "AGY: Running tool…";
 }
 
 export function formatSubagentProgress(info?: { subagents?: Array<{ role?: string; type_name?: string }> }): string {
@@ -563,17 +659,17 @@ export function classifyAgyProgress(
   const stepType = update.step_type;
 
   if (stepType === "tool") {
-    const toolName = update.tool_name || update.tool_info?.name;
-    if (update.state === "ACTIVE") {
-      return formatToolProgress(toolName);
-    }
     if (update.state === "DONE") {
       return "AGY: Working…";
     }
+    const toolName = update.tool_name || update.tool_info?.name;
     return formatToolProgress(toolName);
   }
 
   if (stepType === "subagent") {
+    if (update.state === "DONE") {
+      return "AGY: Working…";
+    }
     return formatSubagentProgress(update.subagent_info);
   }
 
@@ -611,20 +707,13 @@ export function streamSimple(
   registerShutdownHooksOnce();
   const stream = createAssistantMessageEventStream();
 
+  const activeSid =
+    options?.sessionId ?? findSessionId(context) ?? currentSessionId ?? "default";
+  const sessionCb = getSessionProgressCallback(activeSid);
   const rawReportProgress: AgyProgressCallback =
-    options?.onProgress ?? globalProgressCallback ?? (() => {});
+    options?.onProgress ?? sessionCb ?? globalProgressCallback ?? (() => {});
 
-  let currentWorkingMessage: string | undefined;
-  const setProgress = (msg?: string) => {
-    if (msg !== currentWorkingMessage) {
-      currentWorkingMessage = msg;
-      try {
-        rawReportProgress(msg);
-      } catch {
-        // Safe no-op on handler errors
-      }
-    }
-  };
+  const progressAdapter = new AgyProgressAdapter(rawReportProgress);
 
   const output: AssistantMessage = {
     role: "assistant",
@@ -653,7 +742,6 @@ export function streamSimple(
         throw new Error("Request was aborted");
       }
 
-      const activeSid = options?.sessionId ?? currentSessionId;
       const sessionState = activeSid ? getSessionState(activeSid) : undefined;
 
       const compaction = detectCompaction(context);
@@ -758,7 +846,7 @@ export function streamSimple(
             startedEmitted = true;
             stream.push({ type: "start", partial: output });
           }
-          setProgress("AGY: Working…");
+          progressAdapter.update("AGY: Working…");
           if (options?.onResponse) {
             void options.onResponse({ status: 200, headers: {} }, model);
           }
@@ -789,7 +877,7 @@ export function streamSimple(
               : undefined;
 
           if (textDelta) {
-            setProgress(undefined);
+            progressAdapter.clear();
             if (output.content.length === 0) {
               output.content.push({ type: "text", text: "" });
               stream.push({ type: "text_start", contentIndex: 0, partial: output });
@@ -804,7 +892,7 @@ export function streamSimple(
           } else {
             const progress = classifyAgyProgress(update);
             if (progress) {
-              setProgress(progress);
+              progressAdapter.update(progress);
             }
           }
 
@@ -828,7 +916,7 @@ export function streamSimple(
 
       // Execute the turn
       const result = await proc.runTurn(prompt, handleEvent, options?.signal);
-      setProgress(undefined);
+      progressAdapter.clear();
 
       // Fallback: If no streaming deltas were received, populate from terminal result response
       let fallbackResponse: string | undefined;
@@ -903,7 +991,7 @@ export function streamSimple(
       stream.push({ type: "done", reason: finalReason, message: output });
       stream.end();
     } catch (error) {
-      setProgress(undefined);
+      progressAdapter.clear();
       if (boundConversationId) {
         activeProcesses.delete(boundConversationId);
       }
@@ -926,7 +1014,7 @@ export function streamSimple(
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();
     } finally {
-      setProgress(undefined);
+      progressAdapter.clear();
     }
   })();
 

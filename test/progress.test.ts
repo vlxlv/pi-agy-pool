@@ -11,6 +11,7 @@ import {
   formatToolProgress,
   resetActiveProcesses,
   setActiveProgressCallback,
+  setSessionProgressCallback,
   streamSimple,
 } from "../src/stream.ts";
 import { registerAgyPoolProvider } from "../src/provider.ts";
@@ -104,7 +105,8 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     assert.strictEqual(formatToolProgress("run_command"), "AGY: Running command…");
     assert.strictEqual(formatToolProgress("bash"), "AGY: Running command…");
     assert.strictEqual(formatToolProgress("search_web"), "AGY: Searching…");
-    assert.strictEqual(formatToolProgress("code_search"), "AGY: Searching code…");
+    assert.strictEqual(formatToolProgress("search"), "AGY: Searching…");
+    assert.strictEqual(formatToolProgress("code_search"), "AGY: Searching…");
     assert.strictEqual(formatToolProgress("edit_file"), "AGY: Editing file…");
     assert.strictEqual(formatToolProgress("replace_file_content"), "AGY: Editing file…");
     assert.strictEqual(formatToolProgress("write_to_file"), "AGY: Writing file…");
@@ -476,5 +478,173 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
 
     listeners["turn_end"]({}, mockCtx);
     assert.strictEqual(activeWorkingMessage, undefined);
+  });
+
+  // 18. full sequence test: init -> view_file -> done -> run_command -> done -> agent text -> search -> done -> agent text -> result
+  it("18. full multi-step sequence updates and clears live working message", async () => {
+    const mock = createMockChildProcess();
+    const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
+    const progressList: Array<string | undefined> = [];
+
+    const stream = streamSimple(dummyModel, simpleContext, {
+      spawnFn,
+      onProgress: (msg) => progressList.push(msg),
+    });
+
+    mock.stdout.write('{"event":"init","conversation_id":"c-p18"}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"DONE","tool_name":"view_file"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"ACTIVE","tool_name":"run_command"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"DONE","tool_name":"run_command"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":3,"step_type":"agent_response","state":"ACTIVE","text_delta":"First text"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":4,"step_type":"tool","state":"ACTIVE","tool_name":"search"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":4,"step_type":"tool","state":"DONE","tool_name":"search"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":5,"step_type":"agent_response","state":"DONE","text_delta":"Final text"}}\n');
+    mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+
+    await stream.result();
+
+    assert.deepStrictEqual(progressList, [
+      "AGY: Working…",
+      "AGY: Reading file…",
+      "AGY: Working…",
+      "AGY: Running command…",
+      "AGY: Working…",
+      undefined,
+      "AGY: Searching…",
+      "AGY: Working…",
+      undefined,
+    ]);
+  });
+
+  // 19. subagent ACTIVE and DONE transitions
+  it("19. subagent ACTIVE and DONE transitions update working message", async () => {
+    const mock = createMockChildProcess();
+    const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
+    const progressList: Array<string | undefined> = [];
+
+    const stream = streamSimple(dummyModel, simpleContext, {
+      spawnFn,
+      onProgress: (msg) => progressList.push(msg),
+    });
+
+    mock.stdout.write('{"event":"init","conversation_id":"c-p19"}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"subagent","state":"ACTIVE","subagent_info":{"subagents":[{"role":"Code Reviewer"}]}}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"subagent","state":"DONE"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Review finished"}}\n');
+    mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+
+    await stream.result();
+
+    assert.deepStrictEqual(progressList, [
+      "AGY: Working…",
+      "AGY: Code Reviewer subagent…",
+      "AGY: Working…",
+      undefined,
+    ]);
+  });
+
+  // 20. deduplication of repeated identical progress updates
+  it("20. deduplicates repeated identical progress states", async () => {
+    const mock = createMockChildProcess();
+    const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
+    const progressList: Array<string | undefined> = [];
+
+    const stream = streamSimple(dummyModel, simpleContext, {
+      spawnFn,
+      onProgress: (msg) => progressList.push(msg),
+    });
+
+    mock.stdout.write('{"event":"init","conversation_id":"c-p20"}\n');
+    // Multiple identical tool ACTIVE updates
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
+    // Tool finishes
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"DONE","tool_name":"view_file"}}\n');
+    // Multiple text deltas streaming
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"ACTIVE","text_delta":"chunk 1"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"ACTIVE","text_delta":"chunk 2"}}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"chunk 3"}}\n');
+    mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+
+    await stream.result();
+
+    // Despite multiple ACTIVE events and multiple text deltas, each distinct state is emitted exactly once
+    assert.deepStrictEqual(progressList, [
+      "AGY: Working…",
+      "AGY: Reading file…",
+      "AGY: Working…",
+      undefined,
+    ]);
+  });
+
+  // 21. progress resumes after intermediate assistant text
+  it("21. progress row resumes after being cleared for assistant text", async () => {
+    const mock = createMockChildProcess();
+    const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
+    const progressList: Array<string | undefined> = [];
+
+    const stream = streamSimple(dummyModel, simpleContext, {
+      spawnFn,
+      onProgress: (msg) => progressList.push(msg),
+    });
+
+    mock.stdout.write('{"event":"init","conversation_id":"c-p21"}\n');
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","state":"ACTIVE","text_delta":"First thought: "}}\n');
+    assert.strictEqual(progressList[progressList.length - 1], undefined);
+
+    // Later tool starts after text has streamed
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"ACTIVE","tool_name":"search_web"}}\n');
+    assert.strictEqual(progressList[progressList.length - 1], "AGY: Searching…");
+
+    mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"DONE","tool_name":"search_web"}}\n');
+    assert.strictEqual(progressList[progressList.length - 1], "AGY: Working…");
+
+    mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+    await stream.result();
+    assert.strictEqual(progressList[progressList.length - 1], undefined);
+  });
+
+  // 22. concurrent sessions isolation
+  it("22. two concurrent sessions do not steal each other's progress callback", async () => {
+    const mock1 = createMockChildProcess();
+    const mock2 = createMockChildProcess();
+
+    const progressA: Array<string | undefined> = [];
+    const progressB: Array<string | undefined> = [];
+
+    setSessionProgressCallback("session-A", (msg) => progressA.push(msg));
+    setSessionProgressCallback("session-B", (msg) => progressB.push(msg));
+
+    const streamA = streamSimple(dummyModel, simpleContext, {
+      sessionId: "session-A",
+      spawnFn: (() => mock1.child) as unknown as typeof import("node:child_process").spawn,
+    });
+
+    const streamB = streamSimple(dummyModel, simpleContext, {
+      sessionId: "session-B",
+      spawnFn: (() => mock2.child) as unknown as typeof import("node:child_process").spawn,
+    });
+
+    // Session A emits events
+    mock1.stdout.write('{"event":"init","conversation_id":"c-p22-a"}\n');
+    mock1.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
+
+    // Session B emits events concurrently
+    mock2.stdout.write('{"event":"init","conversation_id":"c-p22-b"}\n');
+    mock2.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"run_command"}}\n');
+
+    // Interleave completions
+    mock1.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+    mock2.stdout.write('{"event":"result","status":"SUCCESS"}\n');
+
+    await Promise.all([streamA.result(), streamB.result()]);
+
+    assert.strictEqual(progressA.includes("AGY: Reading file…"), true);
+    assert.strictEqual(progressA.includes("AGY: Running command…"), false);
+
+    assert.strictEqual(progressB.includes("AGY: Running command…"), true);
+    assert.strictEqual(progressB.includes("AGY: Reading file…"), false);
   });
 });
