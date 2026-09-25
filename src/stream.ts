@@ -193,9 +193,112 @@ export function resolveEffort(
   return "medium";
 }
 
+export type AgyProgressCallback = (message?: string) => void;
+
+let globalProgressCallback: AgyProgressCallback | undefined;
+
+export function setActiveProgressCallback(callback?: AgyProgressCallback): void {
+  globalProgressCallback = callback;
+}
+
+export function getActiveProgressCallback(): AgyProgressCallback | undefined {
+  return globalProgressCallback;
+}
+
+export function formatToolProgress(toolName?: string): string {
+  if (!toolName) {
+    return "AGY: Running tool…";
+  }
+  const normalized = toolName.toLowerCase().replace(/[-_]/g, "");
+  switch (normalized) {
+    case "viewfile":
+    case "readfile":
+    case "read":
+      return "AGY: Reading file…";
+    case "runcommand":
+    case "bash":
+    case "terminal":
+    case "shell":
+      return "AGY: Running command…";
+    case "searchweb":
+    case "websearch":
+      return "AGY: Searching…";
+    case "codesearch":
+    case "searchcode":
+    case "grep":
+    case "find":
+      return "AGY: Searching code…";
+    case "editfile":
+    case "replacefilecontent":
+    case "edit":
+      return "AGY: Editing file…";
+    case "writetofile":
+    case "writefile":
+    case "write":
+      return "AGY: Writing file…";
+    case "listdir":
+    case "listdirectory":
+    case "directoryanalysis":
+      return "AGY: Inspecting directory…";
+    case "invokesubagent":
+      return "AGY: Running subagent…";
+    default:
+      return `AGY: Running ${toolName}…`;
+  }
+}
+
+export function formatSubagentProgress(info?: { subagents?: Array<{ role?: string; type_name?: string }> }): string {
+  const first = info?.subagents?.[0];
+  const role = typeof first?.role === "string" ? first.role.trim() : "";
+  const typeName = typeof first?.type_name === "string" ? first.type_name.trim() : "";
+
+  const candidate = role || typeName;
+  if (candidate) {
+    const clean = candidate.replace(/[^\w\s-]/g, "").slice(0, 30).trim();
+    if (clean) {
+      if (clean.toLowerCase().includes("subagent")) {
+        return `AGY: ${clean}…`;
+      }
+      return `AGY: ${clean} subagent…`;
+    }
+  }
+  return "AGY: Running subagent…";
+}
+
+export function classifyAgyProgress(
+  update: AgyStepUpdatePayload,
+): string | undefined {
+  const stepType = update.step_type;
+
+  if (stepType === "tool") {
+    const toolName = update.tool_name || update.tool_info?.name;
+    if (update.state === "ACTIVE") {
+      return formatToolProgress(toolName);
+    }
+    if (update.state === "DONE") {
+      return "AGY: Working…";
+    }
+    return formatToolProgress(toolName);
+  }
+
+  if (stepType === "subagent") {
+    return formatSubagentProgress(update.subagent_info);
+  }
+
+  if (stepType === "agent_response") {
+    if (!update.text_delta) {
+      return "AGY: Working…";
+    }
+    return undefined;
+  }
+
+  return undefined;
+}
+
 export interface ExtendedStreamOptions extends SimpleStreamOptions {
   spawnFn?: typeof spawn;
   bin?: string;
+  onProgress?: AgyProgressCallback;
 }
 
 /**
@@ -214,6 +317,21 @@ export function streamSimple(
 ): AssistantMessageEventStream {
   registerShutdownHooksOnce();
   const stream = createAssistantMessageEventStream();
+
+  const rawReportProgress: AgyProgressCallback =
+    options?.onProgress ?? globalProgressCallback ?? (() => {});
+
+  let currentWorkingMessage: string | undefined;
+  const setProgress = (msg?: string) => {
+    if (msg !== currentWorkingMessage) {
+      currentWorkingMessage = msg;
+      try {
+        rawReportProgress(msg);
+      } catch {
+        // Safe no-op on handler errors
+      }
+    }
+  };
 
   const output: AssistantMessage = {
     role: "assistant",
@@ -319,6 +437,7 @@ export function streamSimple(
             startedEmitted = true;
             stream.push({ type: "start", partial: output });
           }
+          setProgress("AGY: Working…");
           if (options?.onResponse) {
             void options.onResponse({ status: 200, headers: {} }, model);
           }
@@ -349,6 +468,7 @@ export function streamSimple(
               : undefined;
 
           if (textDelta) {
+            setProgress(undefined);
             if (output.content.length === 0) {
               output.content.push({ type: "text", text: "" });
               stream.push({ type: "text_start", contentIndex: 0, partial: output });
@@ -360,6 +480,11 @@ export function streamSimple(
               delta: textDelta,
               partial: output,
             });
+          } else {
+            const progress = classifyAgyProgress(update);
+            if (progress) {
+              setProgress(progress);
+            }
           }
 
           const usage = update.usage;
@@ -382,6 +507,7 @@ export function streamSimple(
 
       // Execute the turn
       const result = await proc.runTurn(prompt, handleEvent, options?.signal);
+      setProgress(undefined);
 
       // Fallback: If no streaming deltas were received, populate from terminal result response
       let fallbackResponse: string | undefined;
@@ -456,6 +582,7 @@ export function streamSimple(
       stream.push({ type: "done", reason: finalReason, message: output });
       stream.end();
     } catch (error) {
+      setProgress(undefined);
       if (boundConversationId) {
         activeProcesses.delete(boundConversationId);
       }
@@ -477,6 +604,8 @@ export function streamSimple(
 
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();
+    } finally {
+      setProgress(undefined);
     }
   })();
 
