@@ -305,7 +305,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     mock.stdout.write('{"event":"result","status":"ERROR","error":"fatal backend crash"}\n');
 
     const result = await stream.result();
-    assert.strictEqual(result.stopReason, "error");
+    assert.strictEqual(result.stopReason, "aborted");
     assert.strictEqual(progressList[progressList.length - 1], undefined);
   });
 
@@ -352,7 +352,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     mock.child.emit("exit", 137, null);
 
     const result = await stream.result();
-    assert.strictEqual(result.stopReason, "error");
+    assert.strictEqual(result.stopReason, "aborted");
     assert.strictEqual(progressList[progressList.length - 1], undefined);
   });
 

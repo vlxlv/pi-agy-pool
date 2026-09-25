@@ -335,7 +335,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
       for await (const event of stream) {
         if (event.type === "error") {
           errorCount++;
-          assert.strictEqual(event.reason, "error");
+          assert.strictEqual(event.reason, "aborted");
         }
       }
     })();
@@ -347,7 +347,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     await consume;
     const result = await stream.result();
     assert.strictEqual(errorCount, 1);
-    assert.strictEqual(result.stopReason, "error");
-    assert.strictEqual(result.errorMessage, "upstream service unavailable");
+    assert.strictEqual(result.stopReason, "aborted");
+    assert.ok(result.errorMessage?.includes("upstream service unavailable"));
   });
 });

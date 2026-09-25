@@ -84,7 +84,7 @@ test("conservative exit during submitted turn discards in-memory resume authorit
   const history: any = { messages: [user, answer, user] };
   const interrupted = streamSimple(model, history, { sessionId: "A", spawnFn: a.spawnFn });
   await tick(); assert.equal(a.child.turns, 2); a.child.emit("exit", 1, null);
-  assert.equal((await interrupted.result()).stopReason, "error");
+  assert.equal((await interrupted.result()).stopReason, "aborted");
   const b = transport(); const next = streamSimple(model, history, { sessionId: "A", spawnFn: b.spawnFn });
   assert.ok(!b.args.includes("--conversation")); await finish(b, next);
 });

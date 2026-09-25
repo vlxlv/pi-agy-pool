@@ -1,3 +1,6 @@
+import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { sanitizeDiagnostic } from "./diagnostics.ts";
 import { randomUUID } from "node:crypto";
 import { API_IDENTIFIER, DEFAULT_PROVIDER_NAME } from "./models.ts";
 import {
@@ -15,7 +18,7 @@ import {
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 import { type AgyEffort, AgyProcess } from "./agy-process.ts";
-import type { AgyEvent, AgyStepUpdatePayload } from "./agy-events.ts";
+import type { AgyEvent, AgyResultEvent, AgyStepUpdatePayload } from "./agy-events.ts";
 import type { spawn } from "node:child_process";
 
 // Diagnostic conversation index only. Session ownership below is the routing authority.
@@ -71,6 +74,7 @@ export interface SessionOwnership {
   // Never reconstructed from responseId or persisted message metadata.
   canResume: boolean;
   systemPrompt?: string;
+  environment?: Record<string, string>;
   provider?: string;
   api?: string;
 }
@@ -152,8 +156,6 @@ export function markSessionCompacted(sessionId: string, owner?: symbol): Promise
   return retireSessionConversation(sessionId, owner);
 }
 
-let shutdownHooksRegistered = false;
-
 /**
  * Clear all active processes and session tracking. Used for test teardown and shutdown.
  */
@@ -164,43 +166,6 @@ export function resetActiveProcesses(): Promise<void> {
   retiredConversationIds.clear();
   validPostCompactionConversations.clear();
   return Promise.all(pending).then(() => {});
-}
-
-export function handleSignal(
-  signal: NodeJS.Signals,
-  exitFn?: (code: number) => void,
-): void {
-  resetActiveProcesses();
-  if (exitFn) {
-    exitFn(signal === "SIGINT" ? 130 : 143);
-  }
-}
-
-const onExit = () => {
-  resetActiveProcesses();
-};
-const onSigInt = () => {
-  handleSignal("SIGINT");
-};
-const onSigTerm = () => {
-  handleSignal("SIGTERM");
-};
-
-export function registerShutdownHooksOnce(): void {
-  if (shutdownHooksRegistered) {
-    return;
-  }
-  shutdownHooksRegistered = true;
-  process.once("exit", onExit);
-  process.once("SIGINT", onSigInt);
-  process.once("SIGTERM", onSigTerm);
-}
-
-export function unregisterShutdownHooksForTesting(): void {
-  process.removeListener("exit", onExit);
-  process.removeListener("SIGINT", onSigInt);
-  process.removeListener("SIGTERM", onSigTerm);
-  shutdownHooksRegistered = false;
 }
 
 // Only typed projection metadata is a compaction signal. Flattened user text is
@@ -335,7 +300,6 @@ export function findConversationId(
   return undefined;
 }
 
-
 /**
  * Construct turn prompt for the official AGY stream-json input.
  */
@@ -408,7 +372,7 @@ export function resolveEffort(
     return undefined;
   }
 
-  const envVal = process.env.AGY_POOL_EFFORT?.toLowerCase();
+  const envVal = (options?.env?.AGY_POOL_EFFORT ?? process.env.AGY_POOL_EFFORT)?.toLowerCase();
 
   if (modelId === "gemini-3.1-pro") {
     if (options?.reasoning) {
@@ -615,12 +579,24 @@ export function formatSubagentProgress(info?: { subagents?: Array<{ role?: strin
 }
 
 export interface ExtendedStreamOptions extends SimpleStreamOptions {
+  cwd?: string;
   spawnFn?: typeof spawn;
   bin?: string;
   onProgress?: AgyProgressCallback;
   owner?: symbol;
   ephemeral?: boolean;
   sessionId?: string;
+}
+
+/** Usage records are snapshots, never deltas. Reasoning is already part of output. */
+function applyUsage(message: AssistantMessage, usage: Record<string, unknown>): void {
+  const count = (key: string) => typeof usage[key] === "number" && Number.isFinite(usage[key]) && usage[key] >= 0 ? usage[key] as number : 0;
+  const input = count("input_tokens"), output = count("output_tokens"), cacheRead = count("cache_read_tokens");
+  const total = typeof usage.total_tokens === "number" && Number.isFinite(usage.total_tokens) && usage.total_tokens >= 0
+    ? usage.total_tokens : input + output + cacheRead;
+  message.usage = { input, output, cacheRead, cacheWrite: 0, totalTokens: total,
+    ...(typeof usage.thinking_tokens === "number" ? { reasoning: count("thinking_tokens") } : {}),
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 }
 
 /**
@@ -637,7 +613,6 @@ export function streamSimple(
   context: TranscriptContext,
   options?: ExtendedStreamOptions,
 ): AssistantMessageEventStream {
-  registerShutdownHooksOnce();
   const stream = createAssistantMessageEventStream();
 
   const previous = options?.sessionId ? sessionStates.get(options.sessionId) : undefined;
@@ -664,9 +639,10 @@ export function streamSimple(
     timestamp: Date.now(),
   };
 
+  stream.push({ type: "start", partial: output });
+
   (async () => {
     let proc: AgyProcess | undefined;
-    let createdProcess = false;
     let requestState: SessionOwnership | undefined;
 
     try {
@@ -721,9 +697,11 @@ export function streamSimple(
       let isResumed = false;
       let replacementClosed: Promise<void> | undefined;
       const effort = resolveEffort(model.id, options);
+      const cwd = resolve(options?.cwd ?? process.cwd());
       const existing = state.process;
       if (existing?.isAlive()) {
-        if (existing.modelId === model.id && existing.effort === effort) {
+        if (existing.modelId === model.id && existing.effort === effort && existing.cwd === cwd &&
+            isDeepStrictEqual(state.environment, options?.env)) {
           proc = existing;
           isResumed = true;
         } else if (existing.isBusy()) {
@@ -740,12 +718,13 @@ export function streamSimple(
           .filter(([owner, session]) => session.state === state && !owner.isAlive())
           .map(([owner]) => owner.closed)).then(() => {});
         proc = new AgyProcess({ modelId: model.id, effort, conversationId,
-          bin: options?.bin, spawnFn: options?.spawnFn });
-        createdProcess = true;
+          bin: options?.bin ?? options?.env?.AGY_POOL_BIN, cwd,
+          env: options?.env ? { ...process.env, ...options.env } : undefined, spawnFn: options?.spawnFn });
         state.owner = options?.owner;
         state.provider = model.provider;
         state.api = model.api;
         state.systemPrompt = systemPrompt;
+        state.environment = options?.env ? { ...options.env } : undefined;
         trackProcess(proc, state);
         isResumed = Boolean(conversationId);
       }
@@ -758,12 +737,11 @@ export function streamSimple(
         const original = buildTurnPrompt(context, isResumed);
         const replacement = await options?.onPayload?.({ event: "user", message: { content: original } }, model);
         if (replacement && typeof replacement === "object" && "message" in replacement) {
-          return (replacement as { message?: { content?: string } }).message?.content || original;
+          const content = (replacement as { message?: { content?: unknown } }).message?.content;
+          return typeof content === "string" ? content : original;
         }
         return original;
       });
-
-      let startedEmitted = false;
 
       let initialized = false;
       const bindInit = () => {
@@ -772,11 +750,7 @@ export function streamSimple(
         initialized = true;
         output.responseId = init.conversation_id;
         (output as unknown as Record<string, unknown>).conversationId = init.conversation_id;
-        if (createdProcess && !startedEmitted) {
-          startedEmitted = true;
-          stream.push({ type: "start", partial: output });
-        }
-        if (createdProcess && options?.onResponse) void options.onResponse({ status: 200, headers: {} }, model);
+        // onResponse describes HTTP headers/status; subprocesses have no HTTP response.
       };
 
       const handleEvent = (event: AgyEvent) => {
@@ -786,11 +760,6 @@ export function streamSimple(
         } else if (event.event === "step_update") {
           const update = (event as { step_update?: AgyStepUpdatePayload }).step_update;
           if (!update) return;
-
-          if (!startedEmitted) {
-            startedEmitted = true;
-            stream.push({ type: "start", partial: output });
-          }
 
           // Invariant: Only step_type == "agent_response" (or legacy untyped response) with text_delta contributes to assistant answer text.
           // Tool, subagent, system_message, and unknown telemetry events must NEVER contribute text or emit tool calls.
@@ -826,21 +795,12 @@ export function streamSimple(
             progressAdapter.step(update);
           }
 
-          const usage = update.usage;
-          if (usage) {
-            if (typeof usage.input_tokens === "number") {
-              output.usage.input = usage.input_tokens;
-            }
-            if (typeof usage.output_tokens === "number") {
-              output.usage.output = usage.output_tokens;
-            }
-            if (typeof usage.total_tokens === "number") {
-              output.usage.totalTokens = usage.total_tokens;
-            }
-            if (typeof usage.thinking_tokens === "number") {
-              output.usage.reasoning = usage.thinking_tokens;
-            }
-          }
+          if (update.usage) applyUsage(output, update.usage);
+        } else if (event.event === "result") {
+          const terminal = event as AgyResultEvent;
+          const usage = terminal.result?.usage ?? terminal.data?.usage ?? terminal.usage;
+          if (usage && typeof usage === "object") applyUsage(output, usage as Record<string, unknown>);
+
         }
       };
 
@@ -877,36 +837,13 @@ export function streamSimple(
         });
       }
 
-      // Terminal usage fallback from result event if not already populated or if provided authoritatively
-      const finalUsage =
-        (result.result?.usage as Record<string, unknown> | undefined) ||
-        (result.data?.usage as Record<string, unknown> | undefined);
-      if (finalUsage) {
-        if (typeof finalUsage.input_tokens === "number") {
-          output.usage.input = finalUsage.input_tokens;
-        }
-        if (typeof finalUsage.output_tokens === "number") {
-          output.usage.output = finalUsage.output_tokens;
-        }
-        if (typeof finalUsage.total_tokens === "number") {
-          output.usage.totalTokens = finalUsage.total_tokens;
-        }
-        if (typeof finalUsage.thinking_tokens === "number") {
-          output.usage.reasoning = finalUsage.thinking_tokens;
-        }
-      }
-      if (
-        output.usage.totalTokens === 0 &&
-        (output.usage.input > 0 || output.usage.output > 0)
-      ) {
-        output.usage.totalTokens = output.usage.input + output.usage.output;
-      }
-
       const stopReason = result.data?.stop_reason || result.result?.stop_reason;
       if (stopReason) {
         output.rawStopReason = stopReason;
         if (stopReason === "MAX_TOKENS") {
-          output.stopReason = "length";
+          // Pi also automatically compact-and-retries recoverable length stops.
+          await retireSessionConversation(activeSid, options?.owner);
+          throw new Error("AGY MAX_TOKENS: native work may be partial; review before retrying");
         } else {
           output.stopReason = "stop";
         }
@@ -934,14 +871,14 @@ export function streamSimple(
       const isAborted =
         Boolean(options?.signal?.aborted) ||
         (error instanceof Error &&
-          (error.name === "AbortError" || error.message.includes("aborted")));
+          (error.name === "AbortError" || error.message === "Request was aborted"));
 
-      output.stopReason = isAborted ? "aborted" : "error";
-      output.errorMessage = isAborted
-        ? "Request was aborted"
-        : error instanceof Error
-          ? error.message
-          : String(error);
+      // Pi 0.87.1 has no non-retryable error flag. Abort automatic continuation
+      // for autonomous subprocess failures; keep diagnostics without replaying work.
+      output.stopReason = "aborted";
+      output.rawStopReason = isAborted ? "cancelled" : "agy_execution_failed";
+      output.errorMessage = isAborted ? "Request was aborted" : sanitizeDiagnostic(
+        `AGY execution stopped; automatic replay disabled. ${error instanceof Error ? error.message : String(error)}`);
 
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();

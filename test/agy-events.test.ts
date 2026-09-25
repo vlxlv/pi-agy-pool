@@ -116,12 +116,12 @@ describe("agy-events.ts: AgyEventDecoder", () => {
   });
 
   it("enforces maximum record size and throws cleanly on record overflow", () => {
-    // Test with small limit of 50 bytes
+    // Test with small limit of 50 UTF-16 code units
     const decoder = new AgyEventDecoder(50);
     const oversizedRecord = '{"event":"step_update","step_update":{"text_delta":"' + "a".repeat(100) + '"}}\n';
     assert.throws(
       () => decoder.feed(oversizedRecord),
-      /NDJSON record size exceeded limit of 50 bytes/,
+      /NDJSON record size exceeded limit of 50 UTF-16 code units/,
     );
   });
 
@@ -130,7 +130,7 @@ describe("agy-events.ts: AgyEventDecoder", () => {
     const endlessChunk = "x".repeat(60);
     assert.throws(
       () => decoder.feed(endlessChunk),
-      /NDJSON buffer limit exceeded \(50 bytes\) without valid line delimiter/,
+      /NDJSON buffer limit exceeded \(50 UTF-16 code units\) without valid line delimiter/,
     );
 
     // After overflow, buffer is cleared and subsequent valid data can be parsed

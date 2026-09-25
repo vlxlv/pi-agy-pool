@@ -136,10 +136,12 @@ export function registerAgyPoolProvider(
       // Only this live runner may use its session ownership. Transcript IDs and
       // old receipts never authorize native resume, including after reload.
       let bound = false;
+      let cwd: string | undefined;
       try {
         bound = Boolean(streamOptions?.sessionId &&
           sessionContext?.sessionManager.getSessionId() === streamOptions.sessionId);
-      } catch { /* Disposed runners use isolated, short-lived ownership. */ }
+        if (bound) cwd = sessionContext!.cwd;
+      } catch { bound = false; cwd = undefined; /* Disposed runners use isolated ownership. */ }
       const controller = new AbortController();
       requests.add(controller);
       const signal = streamOptions?.signal ? AbortSignal.any([streamOptions.signal, controller.signal]) : controller.signal;
@@ -177,6 +179,7 @@ export function registerAgyPoolProvider(
       try {
         const result = streamSimple(model, context, {
           ...streamOptions,
+          cwd: cwd ?? (streamOptions as { cwd?: string } | undefined)?.cwd,
           owner: sessionOwner,
           ephemeral: !bound,
           signal,

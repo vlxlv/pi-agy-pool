@@ -126,7 +126,7 @@ jobs:
 
           ## External Prerequisites
 
-          - **Pi CLI** (`pi`) `>=0.80.0`
+          - **Pi CLI** (`pi`) `>=0.87.1`
           - **`agy-pool`** binary installed and available in `PATH` (or configured via `AGY_POOL_BIN`)
           - Running **`agy-pool-go`** daemon
           - Official **Antigravity** installed and managed by `agy-pool`

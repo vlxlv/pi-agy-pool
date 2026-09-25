@@ -317,3 +317,16 @@ When choosing between:
 - **No Local/Manual Releases:** Creating manual releases or publishing locally is strictly forbidden.
 - **Exact Version Match:** The release git tag (e.g. `v0.3.1`) must strictly match `"version"` in `package.json` (e.g. `0.3.1`). Any mismatch must abort the release immediately prior to artifact generation.
 - **Pre-Release Verification Gates:** Offline tests (`npm test`), TypeScript verification (`npm run typecheck`), and package tarball content inspection (`npm pack`) must pass in CI/CD before GitHub Release creation. Never bypass failed release gates.
+
+## 23. Host integration invariants
+
+- Resolve child cwd from the matching live Pi session context; configuration
+  changes must replace the child under the existing ownership safety rules.
+- Autonomous AGY failures must not be replayed by Pi's automatic retry/recovery.
+  In Pi 0.87.1 use an aborted terminal event with explicit failure diagnostics;
+  there is no provider non-retryable error flag. Do not alter global retry settings.
+- Do not install process-global signal handlers. Use owner-scoped Pi shutdown
+  and request cancellation, without changing other extension instances.
+- `onResponse` is HTTP-only. Await `onPayload` before native submission.
+- Sanitize and bound diagnostics before exposing them in Pi error messages.
+- Keep package/lockfile compatibility metadata aligned; verified minimum Pi is 0.87.1.

@@ -28,7 +28,7 @@ Google
 
 ## Prerequisites
 
-- **Pi CLI** (`pi`) installed and available in `PATH` (`>=0.80.0`).
+- **Pi CLI** (`pi`) installed and available in `PATH` (`>=0.87.1`).
 - **`agy-pool`** binary installed and available in `PATH` (or configured via `AGY_POOL_BIN`).
 - A running **`agy-pool-go`** daemon.
 - Official **Antigravity** installed and managed by `agy-pool`.
@@ -207,6 +207,42 @@ All production releases and package artifacts are built, verified, and published
 4. **GitHub Release Publication:** The workflow creates the GitHub Release for the tag and attaches `pi-agy-pool-X.Y.Z.tgz` as a release asset. No packages are published to the public npm registry, and local or manual releases are strictly forbidden.
 
 ---
+
+## Host integration (Pi 0.87.1+)
+
+Native children use the matching Pi session's `ctx.cwd`, including workspace
+switch/override. A changed cwd or provider environment replaces the child;
+only proven idle in-memory ownership permits native conversation resume.
+Direct API callers may supply `cwd`; without a Pi binding or explicit cwd,
+the current host working directory is used. Provider `env` overrides inherit
+and override the host environment and require replacement when changed.
+
+AGY may have executed autonomous tools before reporting a failure. Pi 0.87.1
+has no provider-specific non-retryable error flag, so this adapter ends failed
+requests with the non-retrying `aborted` stop reason and
+`rawStopReason: agy_execution_failed`, retaining a diagnostic. This deliberately
+stops automatic error/overflow recovery, even for pre-submission failures.
+Native MAX_TOKENS also stops for manual review rather than Pi length recovery.
+Review effects before manually trying again. No global Pi retry setting is
+changed; account scheduling/failover remains exclusively in agy-pool-go.
+
+Cleanup belongs to request AbortSignal (Escape in interactive Pi), session
+shutdown and extension reload. The extension installs no host signal handlers.
+Abrupt host termination is not a graceful-cleanup guarantee. `onPayload` is
+awaited before submission; HTTP-only `onResponse` is not invoked for subprocesses.
+
+Diagnostics redact common credential headers, token/key query fields and known
+key formats, then cap display at 4096 UTF-16 code units. Stderr retains only a
+bounded tail beginning at a complete line; oversized lines are discarded.
+This is best-effort redaction, not recognition of every possible secret format.
+The NDJSON record limit is 4,194,304 UTF-16 code units, not 4 MB of UTF-8 bytes.
+
+Usage records are snapshots. A terminal record replaces all prior counters,
+including on an error result; abort retains the last observed snapshot. Native
+input/output/cache-read values map directly to Pi's corresponding fields;
+thinking is reported as the reasoning breakdown, never added again to output.
+A valid native total is authoritative even if it differs from category sums;
+when absent, total is input + output + cacheRead. No billing/cost is inferred.
 
 ## License
 

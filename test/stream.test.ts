@@ -17,12 +17,9 @@ import {
   activeProcesses,
   buildTurnPrompt,
   findConversationId,
-  handleSignal,
-  registerShutdownHooksOnce,
   resetActiveProcesses,
   resolveEffort,
   streamSimple,
-  unregisterShutdownHooksForTesting,
 } from "../src/stream.ts";
 
 function createMockChildProcess(): {
@@ -311,7 +308,7 @@ describe("stream.ts: streamSimple", () => {
     const errEvent = events[1];
     assert.strictEqual(errEvent.type, "error");
     if (errEvent.type === "error") {
-      assert.strictEqual(errEvent.reason, "error");
+      assert.strictEqual(errEvent.reason, "aborted");
       assert.ok(errEvent.error.errorMessage?.includes("Upstream quota exceeded"));
     }
   });
@@ -480,7 +477,7 @@ describe("stream.ts: streamSimple", () => {
     mock.stdout.write('{"event":"result","status":"ERROR","error":"rate limit"}\n');
 
     const result = await stream.result();
-    assert.strictEqual(result.stopReason, "error");
+    assert.strictEqual(result.stopReason, "aborted");
     // Exactly 1 spawn attempt, zero retries
     assert.strictEqual(spawnCount, 1);
   });
@@ -613,61 +610,6 @@ describe("stream.ts: streamSimple", () => {
     assert.deepStrictEqual(orderOfExecution, ["turn1_stdin", "turn2_stdin"]);
     assert.strictEqual(res1.content[0].type === "text" && res1.content[0].text, "Turn 1 reply");
     assert.strictEqual(res2.content[0].type === "text" && res2.content[0].text, "Turn 2 reply");
-  });
-
-  it("shutdown signals: cleans up active children on SIGINT and SIGTERM without listener leaks", async () => {
-    unregisterShutdownHooksForTesting();
-
-    const sigintListenersBefore = process.listenerCount("SIGINT");
-    const sigtermListenersBefore = process.listenerCount("SIGTERM");
-    const exitListenersBefore = process.listenerCount("exit");
-
-    registerShutdownHooksOnce();
-    // Idempotence: calling again does not add extra listeners
-    registerShutdownHooksOnce();
-
-    assert.strictEqual(process.listenerCount("SIGINT"), sigintListenersBefore + 1);
-    assert.strictEqual(process.listenerCount("SIGTERM"), sigtermListenersBefore + 1);
-    assert.strictEqual(process.listenerCount("exit"), exitListenersBefore + 1);
-
-    // Mock an active process
-    const mock = createMockChildProcess();
-    const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
-    const context = {
-      messages: [{ role: "user", content: "Sig test", timestamp: 1 }],
-    } as unknown as TranscriptContext;
-    streamSimple(dummyModel, context, { spawnFn, sessionId: "stream-test" });
-    mock.stdout.write('{"event":"init","conversation_id":"c-sigint"}\n');
-
-    assert.strictEqual(activeProcesses.has("c-sigint"), true);
-
-    let exitCode: number | undefined;
-    // Invoke signal handler for SIGINT with mock exitFn
-    handleSignal("SIGINT", (code) => {
-      exitCode = code;
-    });
-
-    // Children cleaned up and activeProcesses cleared
-    assert.strictEqual(exitCode, 130);
-    assert.strictEqual(activeProcesses.size, 0);
-    assert.ok(mock.signalsReceived.includes("SIGTERM"));
-
-    // Also test SIGTERM cleanup
-    const mockTerm = createMockChildProcess();
-    const spawnFnTerm = (() => mockTerm.child) as unknown as typeof import("node:child_process").spawn;
-    streamSimple(dummyModel, context, { spawnFn: spawnFnTerm });
-    mockTerm.stdout.write('{"event":"init","conversation_id":"c-sigterm"}\n');
-    assert.strictEqual(activeProcesses.has("c-sigterm"), true);
-
-    let termExitCode: number | undefined;
-    handleSignal("SIGTERM", (code) => {
-      termExitCode = code;
-    });
-    assert.strictEqual(termExitCode, 143);
-    assert.strictEqual(activeProcesses.size, 0);
-    assert.ok(mockTerm.signalsReceived.includes("SIGTERM"));
-
-    unregisterShutdownHooksForTesting();
   });
 
   it("terminal usage fallback: populates usage from result event when step_update omits usage", async () => {
@@ -813,7 +755,7 @@ describe("stream.ts: streamSimple", () => {
     assert.strictEqual(result2.responseId, "c-switch-effort");
   });
 
-  it("handleSignal cleans up children without calling process.exit when no exitFn provided", async () => {
+  it("explicit cleanup closes children", async () => {
     const mock = createMockChildProcess();
     const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
     const context = {
@@ -823,8 +765,7 @@ describe("stream.ts: streamSimple", () => {
     mock.stdout.write('{"event":"init","conversation_id":"c-sig-clean"}\n');
     assert.strictEqual(activeProcesses.has("c-sig-clean"), true);
 
-    // Call handleSignal with NO exitFn - must NOT throw or exit process
-    handleSignal("SIGINT");
+    await resetActiveProcesses();
     assert.strictEqual(activeProcesses.size, 0);
     assert.ok(mock.signalsReceived.includes("SIGTERM"));
   });

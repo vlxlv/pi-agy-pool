@@ -105,7 +105,7 @@ export type AgyEvent =
   | AgyResultEvent
   | { event: string; [key: string]: unknown };
 
-export const DEFAULT_MAX_RECORD_SIZE = 4 * 1024 * 1024; // 4 MB
+export const DEFAULT_MAX_RECORD_SIZE = 4 * 1024 * 1024; // 4 Mi UTF-16 code units (not UTF-8 bytes)
 
 /**
  * Incremental NDJSON event decoder for official AGY stream-json stdout.
@@ -133,7 +133,7 @@ export class AgyEventDecoder {
     if (this.buffer.length > this.maxRecordSize && this.buffer.indexOf("\n") === -1) {
       this.buffer = "";
       throw new Error(
-        `NDJSON buffer limit exceeded (${this.maxRecordSize} bytes) without valid line delimiter`,
+        `NDJSON buffer limit exceeded (${this.maxRecordSize} UTF-16 code units) without valid line delimiter`,
       );
     }
 
@@ -146,7 +146,7 @@ export class AgyEventDecoder {
     if (this.buffer.length > this.maxRecordSize) {
       this.buffer = "";
       throw new Error(
-        `NDJSON buffer limit exceeded (${this.maxRecordSize} bytes) without valid line delimiter`,
+        `NDJSON buffer limit exceeded (${this.maxRecordSize} UTF-16 code units) without valid line delimiter`,
       );
     }
 
@@ -172,7 +172,7 @@ export class AgyEventDecoder {
       if (newlineIndex > this.maxRecordSize) {
         this.buffer = "";
         throw new Error(
-          `NDJSON record size exceeded limit of ${this.maxRecordSize} bytes`,
+          `NDJSON record size exceeded limit of ${this.maxRecordSize} UTF-16 code units`,
         );
       }
 
@@ -198,7 +198,7 @@ export class AgyEventDecoder {
     if (this.buffer.length > this.maxRecordSize) {
       this.buffer = "";
       throw new Error(
-        `NDJSON buffer limit exceeded (${this.maxRecordSize} bytes) without valid line delimiter`,
+        `NDJSON buffer limit exceeded (${this.maxRecordSize} UTF-16 code units) without valid line delimiter`,
       );
     }
 

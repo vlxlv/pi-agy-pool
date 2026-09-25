@@ -40,6 +40,7 @@ interface Turn {
  */
 export class AgyProcess extends EventEmitter {
   readonly modelId: string;
+  readonly cwd?: string;
   readonly effort?: AgyEffort;
   private readonly child: ChildProcess;
   private readonly decoder: AgyEventDecoder;
@@ -50,6 +51,7 @@ export class AgyProcess extends EventEmitter {
   private _isAlive = true;
   private _isAborted = false;
   private stderrTail = "";
+  private discardingStderrLine = false;
   private readonly turns: Turn[] = [];
   private failure?: Error;
   private exited = false;
@@ -66,6 +68,7 @@ export class AgyProcess extends EventEmitter {
   constructor(options: AgyProcessOptions) {
     super();
     this.modelId = options.modelId;
+    this.cwd = options.cwd;
     this.effort = options.effort;
     this.conversationId = options.conversationId;
     this.decoder = new AgyEventDecoder(options.maxRecordSize);
@@ -157,7 +160,20 @@ export class AgyProcess extends EventEmitter {
       if (this.isAlive()) fatal(new Error("AGY stdout closed"));
     });
     this.child.stderr?.on("data", (chunk: Buffer) => {
-      this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-4096);
+      let text = chunk.toString("utf8");
+      if (this.discardingStderrLine) {
+        const end = text.indexOf("\n");
+        if (end < 0) return;
+        text = text.slice(end + 1);
+        this.discardingStderrLine = false;
+      }
+      this.stderrTail += text;
+      if (this.stderrTail.length > 4096) {
+        // Never retain a credential suffix after truncating away its header/key.
+        const boundary = this.stderrTail.indexOf("\n", this.stderrTail.length - 4096);
+        this.discardingStderrLine = boundary < 0;
+        this.stderrTail = boundary < 0 ? "" : this.stderrTail.slice(boundary + 1);
+      }
     });
     this.child.on("error", (error: Error) => {
       this.invalidate(error);

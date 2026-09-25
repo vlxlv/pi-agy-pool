@@ -207,7 +207,7 @@ test("CP1 shutdown covers unregistered child and rejects startup", async () => {
   const f = child(); const stream = streamSimple(model, context, { sessionId: "unregistered", spawnFn: f.spawnFn });
   resetActiveProcesses(); await drain();
   assert.deepEqual(f.signals, ["SIGTERM"]);
-  assert.equal((await stream.result()).stopReason, "error");
+  assert.equal((await stream.result()).stopReason, "aborted");
 });
 
 test("CP1 repeated replacements wait for every retiring predecessor", async () => {
@@ -221,7 +221,7 @@ test("CP1 repeated replacements wait for every retiring predecessor", async () =
   const third = child();
   const c = streamSimple({ ...model, id: "third" }, transcript, { sessionId: "chain", spawnFn: third.spawnFn });
   third.init("chain-id"); await drain();
-  assert.equal((await b.result()).stopReason, "error");
+  assert.equal((await b.result()).stopReason, "aborted");
   second.exit(); await drain(); assert.deepEqual(third.writes, []);
   first.exit(); await drain(); assert.equal(third.writes.length, 1);
   assert.equal(activeProcesses.get("chain-id")?.modelId, "third");
@@ -234,7 +234,7 @@ test("CP1 session retirement owns pre-init children without affecting another se
   const b = streamSimple(model, context, { sessionId: "pre-init-B", spawnFn: second.spawnFn });
   const closed = retireSessionConversation("pre-init-A");
   assert.deepEqual(first.signals, ["SIGTERM"]); assert.deepEqual(second.signals, []);
-  assert.equal((await a.result()).stopReason, "error");
+  assert.equal((await a.result()).stopReason, "aborted");
   first.init("late"); assert.equal(activeProcesses.has("late"), false);
   first.exit(); await closed;
   second.init("live"); await drain(); second.result("B");
@@ -296,7 +296,7 @@ test("CP1 shutdown promise waits for an unregistered child to exit", async () =>
   const stream = streamSimple(model, context, { sessionId: "shutdown-wait", spawnFn: f.spawnFn });
   const shutdown = resetActiveProcesses(); const settled = observe(shutdown);
   await drain(); assert.equal(settled.count, 0);
-  assert.equal((await stream.result()).stopReason, "error");
+  assert.equal((await stream.result()).stopReason, "aborted");
   f.exit(); await shutdown; await drain(); assert.equal(settled.count, 1);
 });
 

@@ -217,7 +217,7 @@ test("ownership late pre-init process callbacks cannot change replacement", asyn
     const one = streamSimple(model, { messages: [user] } as any, { sessionId: "A", owner: oldOwner, spawnFn: a.spawnFn });
     const old = getSessionState("A").process!;
     await releaseProviderProcesses(oldOwner);
-    assert.equal((await one.result()).stopReason, "error");
+    assert.equal((await one.result()).stopReason, "aborted");
     const two = streamSimple(model, { messages: [user] } as any, { sessionId: "A", owner: newOwner, spawnFn: b.spawnFn });
     b.init("Y");
     await drain();
@@ -243,7 +243,7 @@ test("ownership busy replacement cannot resume a partial native future", async (
     const next = transport();
     const replacement = streamSimple({ ...model, id: "other" }, history(answer), { sessionId: "A", spawnFn: next.spawnFn });
     assert.ok(!next.args.includes("--conversation"));
-    assert.equal((await pending.result()).stopReason, "error");
+    assert.equal((await pending.result()).stopReason, "aborted");
     next.init("Y");
     await drain();
     next.result();
