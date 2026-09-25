@@ -1,5 +1,7 @@
 # pi-agy-pool
 
+[![CI](https://github.com/vlxlv/pi-agy-pool/actions/workflows/ci.yml/badge.svg)](https://github.com/vlxlv/pi-agy-pool/actions/workflows/ci.yml) [![Pi Compatibility](https://github.com/vlxlv/pi-agy-pool/actions/workflows/pi-compat.yml/badge.svg)](https://github.com/vlxlv/pi-agy-pool/actions/workflows/pi-compat.yml) [![Release](https://img.shields.io/github/v/release/vlxlv/pi-agy-pool?display_name=tag)](https://github.com/vlxlv/pi-agy-pool/releases/latest) [![License](https://img.shields.io/github/license/vlxlv/pi-agy-pool)](https://github.com/vlxlv/pi-agy-pool/blob/main/LICENSE)
+
 `pi-agy-pool` is a standard, installable [Pi](https://github.com/earendil-works/pi) package and model-provider extension that routes model generation through [`agy-pool-go`](https://github.com/vlxlv/agy-pool-go) and official Antigravity headless.
 
 > **Important:** `pi-agy-pool` does **not** manage Google accounts, OAuth tokens, authentication, quota, or failovers. All account management and scheduling belong strictly to `agy-pool-go`.
@@ -32,6 +34,28 @@ Google
 - **`agy-pool`** binary installed and available in `PATH` (or configured via `AGY_POOL_BIN`).
 - A running **`agy-pool-go`** daemon.
 - Official **Antigravity** installed and managed by `agy-pool`.
+
+### Pi compatibility
+
+Pi `0.87.1` is the minimum supported version and compatibility baseline.
+
+A dedicated compatibility matrix checks the minimum supported Pi and dynamically
+resolved latest upstream Pi using real Pi runtimes with controlled AGY transport.
+It covers provider loading, generation, lifecycle, system/context projection,
+context edits, compaction, fork/tree behavior, skills discovery, Working UI,
+non-interactive modes, and retry/no-replay semantics. No Google generation,
+accounts, or gateway are required for these checks.
+
+See [Pi Compatibility](https://github.com/vlxlv/pi-agy-pool/actions/workflows/pi-compat.yml)
+and the [compatibility tracker](https://github.com/vlxlv/pi-agy-pool/issues/1).
+
+### Pi Skills
+
+Pi's advertised skills remain available through `pi-agy-pool`. Official AGY can
+discover the skill catalog supplied by Pi's ResourceLoader and load advertised
+`SKILL.md` files on demand using its native file tools.
+
+No skill-specific bridge or duplicate Pi tool execution is required.
 
 ### Live progress
 
@@ -220,6 +244,10 @@ npm test
 # Check distribution package contents
 npm pack --dry-run --json
 ```
+
+Pi compatibility is monitored separately against minimum and latest upstream Pi
+using real Pi runtimes with controlled AGY transport. Native Pi → AGY →
+agy-pool → Google acceptance remains a separate release-smoke concern.
 
 ---
 
