@@ -1,0 +1,90 @@
+name: Pi Compatibility
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve upstream Pi
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.versions.outputs.matrix }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Resolve latest to an exact version
+        id: versions
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { appendFileSync } from 'node:fs';
+          try {
+            const latest = JSON.parse(execFileSync('npm', ['view', '@earendil-works/pi-coding-agent@latest', 'version', '--json'], { encoding: 'utf8' }));
+            if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(latest)) throw Error('Invalid resolved version');
+            const matrix = { include: [
+              { target: 'minimum', label: 'Minimum', version: '0.87.1' },
+              { target: 'latest', label: 'Latest', version: latest },
+            ] };
+            appendFileSync(process.env.GITHUB_OUTPUT, 'matrix=' + JSON.stringify(matrix) + '\n');
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY, '# Pi Compatibility targets\n\nMinimum: **0.87.1**\n\nLatest: **' + latest + '** (resolved from npm latest)\n');
+          } catch (error) {
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY, '# 🟡 Pi version resolution failed\n\n' + String(error) + '\n');
+            throw error;
+          }
+          JS
+
+  compatibility:
+    name: ${{ matrix.label }} · ${{ matrix.version }}
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    env:
+      PI_TARGET: ${{ matrix.target }}
+      PI_VERSION: ${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Real Pi semantic contracts · isolated dependencies
+        env:
+          PI_COMPAT_REPORT_DIR: ${{ runner.temp }}/pi-compat-report
+        run: node compat/run.mjs "$PI_TARGET" "$PI_VERSION"
+      - name: Preserve per-contract diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ runner.temp }}/pi-compat-report
+          if-no-files-found: warn
+          retention-days: 30
+
+  summary:
+    name: Compatibility Matrix
+    if: always()
+    needs: [resolve, compatibility]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/pi-compat-results
+      - name: Minimum ↔ Latest contract matrix
+        if: always()
+        env:
+          RESULTS: ${{ runner.temp }}/pi-compat-results
+        run: node compat/summary.mjs "$RESULTS"
