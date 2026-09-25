@@ -33,6 +33,23 @@ Google
 - A running **`agy-pool-go`** daemon.
 - Official **Antigravity** installed and managed by `agy-pool`.
 
+### Live progress
+
+In Pi's interactive TUI, AGY activity appears in one `agy-pool` footer status.
+Tool and subagent telemetry is informational: official AGY executes the tools;
+Pi never executes them again. Pi's native working indicator is left unchanged.
+
+Each request owns its progress within the matching Pi session. If requests overlap,
+the newest request owns the status until it finishes, then any remaining request's
+status is restored. Short operations retain a completed-action label until the next
+activity or assistant text; execution is never delayed to keep a label on screen.
+Text and terminal completion clear the status. A later tool makes it visible again.
+
+Only fixed tool descriptions and recognized role labels are displayed; unknown
+names use generic labels. Arguments, paths, output and prompts are not displayed.
+Print, JSON and RPC modes receive no progress UI updates. The lifecycle/rendering
+integration is tested against Pi 0.87.1.
+
 ---
 
 ## Installation

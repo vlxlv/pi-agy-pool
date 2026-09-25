@@ -110,8 +110,6 @@ export function resetActiveProcesses(): void {
   conversationToSession.clear();
   retiredConversationIds.clear();
   validPostCompactionConversations.clear();
-  sessionProgressCallbacks.clear();
-  globalProgressCallback = undefined;
   currentSessionId = undefined;
 }
 
@@ -501,43 +499,11 @@ export function resolveEffort(
 
 export type AgyProgressCallback = (message?: string) => void;
 
-export const sessionProgressCallbacks = new Map<string, AgyProgressCallback>();
-
-export function setSessionProgressCallback(
-  sessionId: string,
-  callback?: AgyProgressCallback,
-): void {
-  if (callback) {
-    sessionProgressCallbacks.set(sessionId, callback);
-  } else {
-    sessionProgressCallbacks.delete(sessionId);
-  }
-}
-
-export function getSessionProgressCallback(
-  sessionId: string,
-): AgyProgressCallback | undefined {
-  return sessionProgressCallbacks.get(sessionId);
-}
-
-let globalProgressCallback: AgyProgressCallback | undefined;
-
-export function setActiveProgressCallback(callback?: AgyProgressCallback): void {
-  globalProgressCallback = callback;
-}
-
-export function getActiveProgressCallback(): AgyProgressCallback | undefined {
-  return globalProgressCallback;
-}
-
-/**
- * Stateful progress adapter ensuring:
- * - One live status message that updates on transitions.
- * - Repeated identical messages are deduplicated.
- * - Progress row clears while text streams and resumes on later tools.
- */
+/** Request-local telemetry state. No timer delays AGY or queues historical UI frames. */
 export class AgyProgressAdapter {
-  private currentMessage: string | undefined = undefined;
+  private currentMessage: string | undefined;
+  private activities = new Map<string, string>();
+  private ended = false;
   private readonly callback: AgyProgressCallback;
 
   constructor(callback?: AgyProgressCallback) {
@@ -545,12 +511,49 @@ export class AgyProgressAdapter {
   }
 
   update(message?: string): void {
-    if (message !== this.currentMessage) {
+    if (this.ended || message === this.currentMessage) return;
+    try {
+      this.callback(message);
       this.currentMessage = message;
-      try {
-        this.callback(message);
-      } catch {
-        // Safe no-op on handler errors
+    } catch {
+      // UI failure must not interrupt official AGY execution; a later update can retry.
+    }
+  }
+
+  step(update: AgyStepUpdatePayload): void {
+    if (this.ended) return;
+    const type = update.step_type;
+    if (type === "tool" || type === "subagent") {
+      const subagent = update.subagent_info?.subagents?.[0];
+      const identity = update.step_index ?? (type === "tool"
+        ? update.tool_name || update.tool_info?.name
+        : subagent?.conversation_id || subagent?.role || subagent?.type_name);
+      // ponytail: identical unindexed/unnamed activities cannot be distinguished;
+      // use an upstream stable ID if AGY exposes one. Ambiguous DONE keeps peers.
+      let key = JSON.stringify([update.conversation_id, type, identity]);
+      if (update.state === "DONE" && identity === undefined) {
+        const candidates = [...this.activities.keys()].filter((candidate) => {
+          const [conversation, kind] = JSON.parse(candidate);
+          return conversation === (update.conversation_id ?? null) && kind === type;
+        });
+        if (candidates.length === 1) key = candidates[0];
+      }
+      const label = this.activities.get(key) ?? (type === "tool"
+        ? formatToolProgress(update.tool_name || update.tool_info?.name)
+        : formatSubagentProgress(update.subagent_info));
+      if (update.state === "DONE") {
+        this.activities.delete(key);
+        this.update([...this.activities.values()].at(-1) ?? label.replace(/…$/, " — done; continuing…"));
+      } else {
+        this.activities.set(key, label);
+        this.update(label);
+      }
+    } else if (type === "agent_response") {
+      if (typeof update.text_delta === "string" && update.text_delta.length > 0) {
+        this.clear();
+      } else {
+        // Keep a useful completion label across empty response/usage records.
+        this.update([...this.activities.values()].at(-1) ?? this.currentMessage ?? "AGY: Working…");
       }
     }
   }
@@ -559,8 +562,10 @@ export class AgyProgressAdapter {
     this.update(undefined);
   }
 
-  getCurrentMessage(): string | undefined {
-    return this.currentMessage;
+  finish(): void {
+    this.clear();
+    this.activities.clear();
+    this.ended = true;
   }
 }
 
@@ -568,6 +573,7 @@ export function formatToolProgress(toolName?: string): string {
   if (!toolName) {
     return "AGY: Running tool…";
   }
+  if (typeof toolName !== "string") return "AGY: Running tool…";
   const toolLower = toolName.toLowerCase();
   const normalized = toolLower.replace(/[-_]/g, "");
 
@@ -593,13 +599,14 @@ export function formatToolProgress(toolName?: string): string {
     return "AGY: Running command…";
   }
 
+  if (["codesearch", "searchcode", "grep", "find"].includes(normalized)) {
+    return "AGY: Searching code…";
+  }
+
   if (
     toolLower.startsWith("search") ||
     normalized.startsWith("search") ||
-    normalized === "websearch" ||
-    normalized === "codesearch" ||
-    normalized === "grep" ||
-    normalized === "find"
+    normalized === "websearch"
   ) {
     return "AGY: Searching…";
   }
@@ -631,8 +638,8 @@ export function formatToolProgress(toolName?: string): string {
     return "AGY: Running subagent…";
   }
 
-  const safeName = toolName.replace(/[^\w-]/g, "").slice(0, 30);
-  return safeName ? `AGY: Running ${safeName}…` : "AGY: Running tool…";
+  // Unknown names may contain paths or secrets; never echo them.
+  return "AGY: Running tool…";
 }
 
 export function formatSubagentProgress(info?: { subagents?: Array<{ role?: string; type_name?: string }> }): string {
@@ -640,47 +647,16 @@ export function formatSubagentProgress(info?: { subagents?: Array<{ role?: strin
   const role = typeof first?.role === "string" ? first.role.trim() : "";
   const typeName = typeof first?.type_name === "string" ? first.type_name.trim() : "";
 
-  const candidate = role || typeName;
-  if (candidate) {
-    const clean = candidate.replace(/[^\w\s-]/g, "").slice(0, 30).trim();
-    if (clean) {
-      if (clean.toLowerCase().includes("subagent")) {
-        return `AGY: ${clean}…`;
-      }
-      return `AGY: ${clean} subagent…`;
-    }
-  }
-  return "AGY: Running subagent…";
-}
-
-export function classifyAgyProgress(
-  update: AgyStepUpdatePayload,
-): string | undefined {
-  const stepType = update.step_type;
-
-  if (stepType === "tool") {
-    if (update.state === "DONE") {
-      return "AGY: Working…";
-    }
-    const toolName = update.tool_name || update.tool_info?.name;
-    return formatToolProgress(toolName);
-  }
-
-  if (stepType === "subagent") {
-    if (update.state === "DONE") {
-      return "AGY: Working…";
-    }
-    return formatSubagentProgress(update.subagent_info);
-  }
-
-  if (stepType === "agent_response") {
-    if (!update.text_delta) {
-      return "AGY: Working…";
-    }
-    return undefined;
-  }
-
-  return undefined;
+  const candidate = (role || typeName).replace(/\s+/g, " ").trim();
+  // Only display known role labels; arbitrary roles may contain prompts or credentials.
+  const roles: Record<string, string> = {
+    research: "Research", researcher: "Research", "research subagent": "Research",
+    "code reviewer": "Code Reviewer", "architecture auditor": "Architecture Auditor",
+    explorer: "Explorer", planner: "Planner", reviewer: "Reviewer",
+  };
+  const key = candidate.toLowerCase();
+  const label = candidate.length <= 30 && Object.hasOwn(roles, key) ? roles[key] : undefined;
+  return label ? `AGY: ${label} subagent…` : "AGY: Running subagent…";
 }
 
 export interface ExtendedStreamOptions extends SimpleStreamOptions {
@@ -709,11 +685,7 @@ export function streamSimple(
 
   const activeSid =
     options?.sessionId ?? findSessionId(context) ?? currentSessionId ?? "default";
-  const sessionCb = getSessionProgressCallback(activeSid);
-  const rawReportProgress: AgyProgressCallback =
-    options?.onProgress ?? sessionCb ?? globalProgressCallback ?? (() => {});
-
-  const progressAdapter = new AgyProgressAdapter(rawReportProgress);
+  const progressAdapter = new AgyProgressAdapter(options?.onProgress);
 
   const output: AssistantMessage = {
     role: "assistant",
@@ -742,6 +714,7 @@ export function streamSimple(
         throw new Error("Request was aborted");
       }
 
+      progressAdapter.update("AGY: Working…");
       const sessionState = activeSid ? getSessionState(activeSid) : undefined;
 
       const compaction = detectCompaction(context);
@@ -890,10 +863,7 @@ export function streamSimple(
               partial: output,
             });
           } else {
-            const progress = classifyAgyProgress(update);
-            if (progress) {
-              progressAdapter.update(progress);
-            }
+            progressAdapter.step(update);
           }
 
           const usage = update.usage;
@@ -916,7 +886,7 @@ export function streamSimple(
 
       // Execute the turn
       const result = await proc.runTurn(prompt, handleEvent, options?.signal);
-      progressAdapter.clear();
+      progressAdapter.finish();
 
       // Fallback: If no streaming deltas were received, populate from terminal result response
       let fallbackResponse: string | undefined;
@@ -991,7 +961,7 @@ export function streamSimple(
       stream.push({ type: "done", reason: finalReason, message: output });
       stream.end();
     } catch (error) {
-      progressAdapter.clear();
+      progressAdapter.finish();
       if (boundConversationId) {
         activeProcesses.delete(boundConversationId);
       }
@@ -1014,7 +984,7 @@ export function streamSimple(
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();
     } finally {
-      progressAdapter.clear();
+      progressAdapter.finish();
     }
   })();
 

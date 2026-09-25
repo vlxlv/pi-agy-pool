@@ -4,17 +4,13 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import type { Model, TextContent, TranscriptContext, UserMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  classifyAgyProgress,
+  AgyProgressAdapter,
   formatSubagentProgress,
   formatToolProgress,
   resetActiveProcesses,
-  setActiveProgressCallback,
-  setSessionProgressCallback,
   streamSimple,
 } from "../src/stream.ts";
-import { registerAgyPoolProvider } from "../src/provider.ts";
 
 function createMockChildProcess(): {
   child: ChildProcess;
@@ -52,7 +48,6 @@ function createMockChildProcess(): {
 describe("progress.test.ts: AGY progress visibility & sanitization", () => {
   beforeEach(() => {
     resetActiveProcesses();
-    setActiveProgressCallback(undefined);
   });
 
   const dummyModel: Model<"agy-pool-api"> = {
@@ -78,8 +73,8 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     ],
   } as unknown as TranscriptContext;
 
-  // 1. tool ACTIVE produces working-message progress
-  it("1. tool ACTIVE produces working-message progress", async () => {
+  // 1. tool ACTIVE produces status progress
+  it("1. tool ACTIVE produces status progress", async () => {
     const mock = createMockChildProcess();
     const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
     const progressList: Array<string | undefined> = [];
@@ -106,7 +101,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     assert.strictEqual(formatToolProgress("bash"), "AGY: Running command…");
     assert.strictEqual(formatToolProgress("search_web"), "AGY: Searching…");
     assert.strictEqual(formatToolProgress("search"), "AGY: Searching…");
-    assert.strictEqual(formatToolProgress("code_search"), "AGY: Searching…");
+    assert.strictEqual(formatToolProgress("code_search"), "AGY: Searching code…");
     assert.strictEqual(formatToolProgress("edit_file"), "AGY: Editing file…");
     assert.strictEqual(formatToolProgress("replace_file_content"), "AGY: Editing file…");
     assert.strictEqual(formatToolProgress("write_to_file"), "AGY: Writing file…");
@@ -115,7 +110,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
 
   // 3. unknown tool receives safe fallback
   it("3. unknown tool receives safe fallback", async () => {
-    assert.strictEqual(formatToolProgress("custom_analyzer"), "AGY: Running custom_analyzer…");
+    assert.strictEqual(formatToolProgress("custom_analyzer"), "AGY: Running tool…");
     assert.strictEqual(formatToolProgress(undefined), "AGY: Running tool…");
 
     const mock = createMockChildProcess();
@@ -133,7 +128,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
 
     await stream.result();
-    assert.strictEqual(progressList.includes("AGY: Running custom_analyzer…"), true);
+    assert.strictEqual(progressList.includes("AGY: Running tool…"), true);
   });
 
   // 4. tool output is never displayed
@@ -434,54 +429,8 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     assert.strictEqual(result.stopReason, "stop");
   });
 
-  // 17. real ExtensionContext lifecycle bridge integration
-  it("17. integrates with real ExtensionContext UI lifecycle hooks", async () => {
-    const listeners: Record<string, Function> = {};
-    const mockPi = {
-      on: (event: string, handler: Function) => {
-        listeners[event] = handler;
-        return () => {};
-      },
-      registerProvider: () => {},
-    } as unknown as ExtensionAPI;
-
-    registerAgyPoolProvider(mockPi);
-
-    let activeWorkingMessage: string | undefined = "default";
-    const mockCtx = {
-      ui: {
-        setWorkingMessage: (msg?: string) => {
-          activeWorkingMessage = msg;
-        },
-      },
-    } as unknown as ExtensionContext;
-
-    // Simulate Pi turn lifecycle
-    listeners["turn_start"]({}, mockCtx);
-
-    const mock = createMockChildProcess();
-    const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
-
-    const stream = streamSimple(dummyModel, simpleContext, { spawnFn });
-
-    mock.stdout.write('{"event":"init","conversation_id":"c-p17"}\n');
-    assert.strictEqual(activeWorkingMessage, "AGY: Working…");
-
-    mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
-    assert.strictEqual(activeWorkingMessage, "AGY: Reading file…");
-
-    mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Done"}}\n');
-    assert.strictEqual(activeWorkingMessage, undefined);
-
-    mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
-    await stream.result();
-
-    listeners["turn_end"]({}, mockCtx);
-    assert.strictEqual(activeWorkingMessage, undefined);
-  });
-
   // 18. full sequence test: init -> view_file -> done -> run_command -> done -> agent text -> search -> done -> agent text -> result
-  it("18. full multi-step sequence updates and clears live working message", async () => {
+  it("18. full multi-step sequence updates and clears live status", async () => {
     const mock = createMockChildProcess();
     const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
     const progressList: Array<string | undefined> = [];
@@ -507,18 +456,18 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     assert.deepStrictEqual(progressList, [
       "AGY: Working…",
       "AGY: Reading file…",
-      "AGY: Working…",
+      "AGY: Reading file — done; continuing…",
       "AGY: Running command…",
-      "AGY: Working…",
+      "AGY: Running command — done; continuing…",
       undefined,
       "AGY: Searching…",
-      "AGY: Working…",
+      "AGY: Searching — done; continuing…",
       undefined,
     ]);
   });
 
   // 19. subagent ACTIVE and DONE transitions
-  it("19. subagent ACTIVE and DONE transitions update working message", async () => {
+  it("19. subagent ACTIVE and DONE transitions update status", async () => {
     const mock = createMockChildProcess();
     const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
     const progressList: Array<string | undefined> = [];
@@ -539,7 +488,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     assert.deepStrictEqual(progressList, [
       "AGY: Working…",
       "AGY: Code Reviewer subagent…",
-      "AGY: Working…",
+      "AGY: Code Reviewer subagent — done; continuing…",
       undefined,
     ]);
   });
@@ -574,7 +523,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     assert.deepStrictEqual(progressList, [
       "AGY: Working…",
       "AGY: Reading file…",
-      "AGY: Working…",
+      "AGY: Reading file — done; continuing…",
       undefined,
     ]);
   });
@@ -599,52 +548,53 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     assert.strictEqual(progressList[progressList.length - 1], "AGY: Searching…");
 
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"DONE","tool_name":"search_web"}}\n');
-    assert.strictEqual(progressList[progressList.length - 1], "AGY: Working…");
+    assert.strictEqual(progressList[progressList.length - 1], "AGY: Searching — done; continuing…");
 
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     await stream.result();
     assert.strictEqual(progressList[progressList.length - 1], undefined);
   });
 
-  // 22. concurrent sessions isolation
-  it("22. two concurrent sessions do not steal each other's progress callback", async () => {
-    const mock1 = createMockChildProcess();
-    const mock2 = createMockChildProcess();
+});
 
-    const progressA: Array<string | undefined> = [];
-    const progressB: Array<string | undefined> = [];
+it("tracks overlapping step identities and ignores events after terminal cleanup", () => {
+  const seen: Array<string | undefined> = [];
+  const state = new AgyProgressAdapter((text) => seen.push(text));
+  state.update("AGY: Working…");
+  state.step({ step_type: "tool", step_index: 1, state: "ACTIVE", tool_name: "read_file" });
+  state.step({ step_type: "subagent", step_index: 1, state: "ACTIVE", subagent_info: { subagents: [{ role: "Research" }] } });
+  state.step({ step_type: "tool", step_index: 1, state: "DONE" });
+  assert.equal(seen.at(-1), "AGY: Research subagent…");
+  state.step({ step_type: "subagent", step_index: 1, state: "DONE" });
+  assert.equal(seen.at(-1), "AGY: Research subagent — done; continuing…");
+  state.step({ step_type: "agent_response", state: "ACTIVE" });
+  assert.equal(seen.at(-1), "AGY: Research subagent — done; continuing…");
+  state.step({ step_type: "agent_response", text_delta: "answer" });
+  assert.equal(seen.at(-1), undefined);
+  state.step({ step_type: "tool", step_index: 2, state: "ACTIVE", tool_name: "code_search" });
+  assert.equal(seen.at(-1), "AGY: Searching code…");
+  state.finish();
+  state.step({ step_type: "tool", step_index: 3, state: "ACTIVE" });
+  assert.equal(seen.at(-1), undefined);
+});
 
-    setSessionProgressCallback("session-A", (msg) => progressA.push(msg));
-    setSessionProgressCallback("session-B", (msg) => progressB.push(msg));
+it("does not echo unknown names, paths, terminal escapes, or free-form roles", () => {
+  for (const value of ["/private/credentials", "TOKEN_12345", "\x1b[31msecret", "x".repeat(500), "prompt\ncontents", "constructor", "__proto__"]) {
+    assert.equal(formatToolProgress(value), "AGY: Running tool…");
+    assert.equal(formatSubagentProgress({ subagents: [{ role: value }] }), "AGY: Running subagent…");
+  }
+});
 
-    const streamA = streamSimple(dummyModel, simpleContext, {
-      sessionId: "session-A",
-      spawnFn: (() => mock1.child) as unknown as typeof import("node:child_process").spawn,
-    });
-
-    const streamB = streamSimple(dummyModel, simpleContext, {
-      sessionId: "session-B",
-      spawnFn: (() => mock2.child) as unknown as typeof import("node:child_process").spawn,
-    });
-
-    // Session A emits events
-    mock1.stdout.write('{"event":"init","conversation_id":"c-p22-a"}\n');
-    mock1.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
-
-    // Session B emits events concurrently
-    mock2.stdout.write('{"event":"init","conversation_id":"c-p22-b"}\n');
-    mock2.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"run_command"}}\n');
-
-    // Interleave completions
-    mock1.stdout.write('{"event":"result","status":"SUCCESS"}\n');
-    mock2.stdout.write('{"event":"result","status":"SUCCESS"}\n');
-
-    await Promise.all([streamA.result(), streamB.result()]);
-
-    assert.strictEqual(progressA.includes("AGY: Reading file…"), true);
-    assert.strictEqual(progressA.includes("AGY: Running command…"), false);
-
-    assert.strictEqual(progressB.includes("AGY: Running command…"), true);
-    assert.strictEqual(progressB.includes("AGY: Reading file…"), false);
-  });
+it("uses names when indices are absent and ambiguous DONE does not erase peers", () => {
+  const seen: Array<string | undefined> = [];
+  const state = new AgyProgressAdapter((text) => seen.push(text));
+  state.step({ step_type: "tool", state: "ACTIVE", tool_name: "read_file" });
+  state.step({ step_type: "tool", state: "ACTIVE", tool_name: "run_command" });
+  state.step({ step_type: "tool", state: "DONE" });
+  assert.equal(seen.at(-1), "AGY: Running command…");
+  state.step({ step_type: "tool", state: "DONE", tool_name: "read_file" });
+  assert.equal(seen.at(-1), "AGY: Running command…");
+  state.step({ step_type: "tool", state: "DONE" });
+  assert.equal(seen.at(-1), "AGY: Running command — done; continuing…");
+  state.finish();
 });
