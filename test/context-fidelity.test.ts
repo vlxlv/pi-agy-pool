@@ -57,5 +57,5 @@ for (const role of ["user", "assistant", "branchSummary"]) test(`CP3 ${role} quo
 });
 test("CP3 historical tool call and result retain semantic fields without internal metadata",()=>{
  const ctx:any={messages:[system,{...assistant("ANSWER_MARK"),content:[{type:"toolCall",id:"PRIVATE_CALL",name:"read",arguments:{path:"semantic-path"},thoughtSignature:"PRIVATE_SIGNATURE"}],usage:{input:99},responseId:"PRIVATE_RESPONSE"},{role:"toolResult",toolCallId:"PRIVATE_CALL",toolName:"read",isError:true,content:[{type:"text",text:"TOOL_FACT"}],details:{internal:"PRIVATE_DETAILS"},timestamp:999},user("LATEST_MARK")]};
- const p=buildTurnPrompt(ctx,false);assert(!p.includes("PRIVATE_"));const r=records(p);assert.deepEqual(r[1].content,[{type:"toolCall",name:"read",arguments:{path:"semantic-path"}}]);assert.equal(r[2].role,"toolResult");assert.equal(r[2].isError,true);once(p,"TOOL_FACT");
+ const p=buildTurnPrompt(ctx,false);assert(!p.includes("PRIVATE_"));const r=records(p);assert.deepEqual(r[1].content,[{type:"toolCall",ref:"call_1",name:"read",arguments:{path:"semantic-path"}}]);assert.equal(r[2].role,"toolResult");assert.equal(r[2].isError,true);once(p,"TOOL_FACT");
 });
