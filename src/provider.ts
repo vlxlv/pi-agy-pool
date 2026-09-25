@@ -1,4 +1,3 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -9,7 +8,6 @@ import type {
 import {
   markSessionCompacted,
   releaseProviderProcesses,
-  ownershipReceipt,
   retireSessionConversation,
   streamSimple,
 } from "./stream.ts";
@@ -135,34 +133,13 @@ export function registerAgyPoolProvider(
     baseUrl,
     models,
     streamSimple(model, context, streamOptions) {
-      // A runner can authorize historical resume only for its actual session.
-      // Compare the projection receipt to the last receipt across the entire tree:
-      // a historical branch endpoint is not the mutable native conversation tip.
+      // Only this live runner may use its session ownership. Transcript IDs and
+      // old receipts never authorize native resume, including after reload.
       let bound = false;
-      let resume;
-      let branchCheckpoint: string | null | undefined;
       try {
-        const manager = sessionContext?.sessionManager;
-        if (streamOptions?.sessionId && manager?.getSessionId() === streamOptions.sessionId) {
-          bound = true;
-          const relevant = (m: { role: string }) => m.role === "assistant" &&
-            (m as AssistantMessage).provider === model.provider && (m as AssistantMessage).api === model.api;
-          const current = [...context.messages].reverse().find(m => m.role === "assistant") as AssistantMessage | undefined;
-          const latest = manager.getEntries().filter(e => e.type === "message" && relevant(e.message)).at(-1);
-          const receipt = current && relevant(current) ? ownershipReceipt(current) : undefined;
-          branchCheckpoint = receipt?.checkpoint ?? null;
-          if (receipt?.sessionId === streamOptions.sessionId && latest?.type === "message" &&
-              latest.message.role === "assistant" && latest.message.stopReason !== "error" &&
-              latest.message.stopReason !== "aborted" && ownershipReceipt(latest.message)?.checkpoint === receipt.checkpoint) {
-            resume = receipt;
-          }
-        }
-      } catch {
-        // A disposed runner cannot authorize either live reuse or historical resume.
-        bound = false;
-        resume = undefined;
-        branchCheckpoint = undefined;
-      }
+        bound = Boolean(streamOptions?.sessionId &&
+          sessionContext?.sessionManager.getSessionId() === streamOptions.sessionId);
+      } catch { /* Disposed runners use isolated, short-lived ownership. */ }
       const controller = new AbortController();
       requests.add(controller);
       const signal = streamOptions?.signal ? AbortSignal.any([streamOptions.signal, controller.signal]) : controller.signal;
@@ -200,8 +177,6 @@ export function registerAgyPoolProvider(
       try {
         const result = streamSimple(model, context, {
           ...streamOptions,
-          resume,
-          branchCheckpoint,
           owner: sessionOwner,
           ephemeral: !bound,
           signal,

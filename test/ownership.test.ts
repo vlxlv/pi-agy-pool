@@ -40,7 +40,7 @@ for (const provider of ["openai", "anthropic", "google", "another-extension"]) {
         const f = transport();
         const request = streamSimple(model, history(a), {
             sessionId: "A", spawnFn: f.spawnFn, resume: (a as any).agyPoolOwner,
-        });
+        } as any);
         assert.ok(!f.args.includes("--conversation"));
         f.init("fresh");
         await drain();
@@ -81,14 +81,14 @@ test("ownership missing identity never infers session from history", async () =>
     await s.result();
     assert.equal(f.writes.length, 1);
 });
-test("ownership receipt authorizes new-process restart, not foreign-session resume", async () => {
+test("ownership historical receipt cannot authorize new-process restart", async () => {
     const { answer } = await first();
-    assert.equal((answer as any).agyPoolOwner.sessionId, "A");
+    assert.equal((answer as any).agyPoolOwner, undefined);
     await resetActiveProcesses();
     const f = transport();
     const s = streamSimple(model, history(answer), { sessionId: "A", spawnFn: f.spawnFn, resume: (answer as any).agyPoolOwner } as any);
-    assert.equal(f.args[f.args.indexOf("--conversation") + 1], "X");
-    f.init("X");
+    assert.ok(!f.args.includes("--conversation"));
+    f.init("Y");
     await drain();
     f.result();
     await s.result();
@@ -185,7 +185,7 @@ test("ownership stale runner cleanup cannot erase replacement binding", async ()
     const answer = await first.result();
     await releaseSessionProcesses("A", oldOwner);
     const b = transport();
-    const next = streamSimple(model, history(answer), { sessionId: "A", owner: newOwner, spawnFn: b.spawnFn, resume: (answer as any).agyPoolOwner });
+    const next = streamSimple(model, history(answer), { sessionId: "A", owner: newOwner, spawnFn: b.spawnFn });
     b.init("X");
     await drain();
     await releaseSessionProcesses("A", oldOwner);

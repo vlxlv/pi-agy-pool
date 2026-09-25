@@ -32,7 +32,10 @@ function trackProcess(proc: AgyProcess, state: SessionOwnership): void {
     removeProcessReferences(proc);
     if (state.process === proc) {
       state.process = undefined;
-      if (state.pending > 0) state.needsBootstrap = true;
+      if (state.pending > 0) {
+        state.needsBootstrap = true;
+        state.canResume = false;
+      }
     }
   });
   void proc.closed.then(() => {
@@ -59,10 +62,12 @@ export interface SessionOwnership {
   retiredConversationIds: Set<string>;
   process?: AgyProcess;
   owner?: symbol;
-  // In-flight callers only determine whether process death invalidates the checkpoint.
+  // In-flight callers determine whether process death loses a proven idle boundary.
   // Scheduling remains exclusively AgyProcess.runTurn()'s FIFO.
   pending: number;
-  checkpoint?: string;
+  // In-memory authority only: a successful terminal result, no unresolved turn.
+  // Never reconstructed from responseId or persisted message metadata.
+  canResume: boolean;
   provider?: string;
   api?: string;
 }
@@ -78,6 +83,7 @@ export function getSessionState(sessionId: string): SessionOwnership {
       sessionId,
       needsBootstrap: false,
       pending: 0,
+      canResume: false,
       retiredConversationIds: new Set(),
     };
     sessionStates.set(sessionId, state);
@@ -96,7 +102,7 @@ export function retireSessionConversation(sessionId: string, owner?: symbol): Pr
   const processes = new Set<AgyProcess>();
   for (const [proc, owner] of ownedProcesses) if (owner.state === state) processes.add(proc);
   state.process = undefined;
-  state.checkpoint = undefined;
+  state.canResume = false;
   if (state.activeConversationId) {
     const id = state.activeConversationId;
     state.retiredConversationIds.add(id);
@@ -111,28 +117,29 @@ export function retireSessionConversation(sessionId: string, owner?: symbol): Pr
   })).then(() => {});
 }
 
-/** Release only this session's children; persisted receipts remain resume candidates. */
+/** Releasing ownership also revokes native resume authority. */
 export function releaseSessionProcesses(sessionId: string, owner?: symbol): Promise<void> {
   const state = sessionStates.get(sessionId);
   if (!state || (owner && state.owner !== owner)) return Promise.resolve();
   state.process = undefined;
+  state.canResume = false;
+  state.needsBootstrap = true;
   return Promise.all([...ownedProcesses].filter(([, registration]) => registration.state === state && (!owner || registration.owner === owner))
     .map(([proc]) => proc.kill())).then(() => {});
 }
 
 /** Runner disposal also owns short-lived requests whose routing ID differs (e.g. compaction). */
 export function releaseProviderProcesses(owner: symbol): Promise<void> {
+  // Include idle owners whose child already exited and left the process registry.
+  for (const state of sessionStates.values()) if (state.owner === owner) {
+    state.canResume = false;
+    state.needsBootstrap = true;
+  }
   return Promise.all([...ownedProcesses].filter(([, registration]) => registration.owner === owner)
     .map(([proc, registration]) => {
       if (registration.state.process === proc) registration.state.process = undefined;
       return proc.kill();
     })).then(() => {});
-}
-
-export interface OwnershipReceipt { sessionId: string; checkpoint: string }
-export function ownershipReceipt(message: AssistantMessage): OwnershipReceipt | undefined {
-  const receipt = (message as AssistantMessage & { agyPoolOwner?: OwnershipReceipt }).agyPoolOwner;
-  return receipt && typeof receipt.sessionId === "string" && typeof receipt.checkpoint === "string" ? receipt : undefined;
 }
 
 /**
@@ -699,11 +706,8 @@ export interface ExtendedStreamOptions extends SimpleStreamOptions {
   spawnFn?: typeof spawn;
   bin?: string;
   onProgress?: AgyProgressCallback;
-  /** Verified against the real Pi session tree by the registered provider. */
-  resume?: OwnershipReceipt;
   owner?: symbol;
   ephemeral?: boolean;
-  branchCheckpoint?: string | null;
   sessionId?: string;
 }
 
@@ -780,19 +784,19 @@ export function streamSimple(
       const state = getSessionState(activeSid);
       requestState = state;
       state.pending++;
-      const candidate = findConversationId(context, { sessionId: activeSid, provider: model.provider, api: model.api });
       const lastAssistant = [...context.messages].reverse().find(m => m.role === "assistant") as AssistantMessage | undefined;
-      const historicalReceipt = lastAssistant && ownershipReceipt(lastAssistant);
-      const canResume = Boolean(options?.sessionId && candidate && historicalReceipt?.sessionId === activeSid &&
-        options?.resume?.sessionId === activeSid && options.resume.checkpoint === historicalReceipt.checkpoint);
-      if ((state.process || state.checkpoint) && !state.process?.isBusy() && (
-        (options?.branchCheckpoint !== undefined && state.checkpoint !== options.branchCheckpoint) ||
-        (state.provider !== model.provider || state.api !== model.api))) {
+      // A different runner cannot inherit idle/dead ownership merely by opening
+      // the same Pi session ID. A live conflicting owner was isolated above.
+      if (state.owner !== options?.owner || (!state.process?.isBusy() && (
+        (state.provider !== undefined && (state.provider !== model.provider || state.api !== model.api)) ||
+        (lastAssistant && (lastAssistant.provider !== model.provider || lastAssistant.api !== model.api))))) {
         void retireSessionConversation(activeSid);
         isBootstrapTurn = true;
       }
-      let conversationId = isBootstrapTurn ? undefined : state.activeConversationId || (canResume ? candidate : undefined);
-      // Even a valid historical receipt cannot attach a second owner to a mutable conversation.
+      // Native continuation requires this in-memory lineage and a completed turn.
+      // Historical responseId is useful metadata, never a resume credential.
+      let conversationId = !isBootstrapTurn && state.canResume ? state.activeConversationId : undefined;
+      // A second owner must never attach to the same mutable conversation.
       if (conversationId && [...ownedProcesses].some(([p, owner]) => owner.state !== state &&
           p.conversationId === conversationId)) conversationId = undefined;
       let isResumed = false;
@@ -826,6 +830,9 @@ export function streamSimple(
         isResumed = Boolean(conversationId);
       }
 
+      // A new attempt revokes the proven idle boundary until its terminal success.
+      // Even a preparation-only failure may conservatively lose replacement reuse.
+      state.canResume = false;
       // Reserve the FIFO slot before an asynchronous payload hook can yield.
       const prompt = Promise.resolve().then(async () => {
         const original = buildTurnPrompt(context, isResumed);
@@ -994,9 +1001,7 @@ export function streamSimple(
         });
       }
 
-      const receipt: OwnershipReceipt = { sessionId: activeSid, checkpoint: randomUUID() };
-      if (!ephemeral) (output as AssistantMessage & { agyPoolOwner: OwnershipReceipt }).agyPoolOwner = receipt;
-      if (state.process === proc) state.checkpoint = receipt.checkpoint;
+      if (state.process === proc) state.canResume = !proc.isBusy();
       const finalReason =
         output.stopReason === "stop" || output.stopReason === "length"
           ? output.stopReason
@@ -1024,7 +1029,15 @@ export function streamSimple(
       if (requestState) requestState.pending--;
       if (ephemeral) {
         await releaseSessionProcesses(activeSid);
-        sessionStates.delete(activeSid);
+        if (requestState) {
+          const ids = new Set(requestState.retiredConversationIds);
+          if (requestState.activeConversationId) ids.add(requestState.activeConversationId);
+          for (const id of ids) {
+            validPostCompactionConversations.delete(id);
+            retiredConversationIds.delete(id);
+          }
+        }
+        if (sessionStates.get(activeSid) === requestState) sessionStates.delete(activeSid);
       }
       progressAdapter.finish();
     }

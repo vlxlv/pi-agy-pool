@@ -57,18 +57,18 @@ test("real Pi tree backward and sibling invalidates mutable future", async (t) =
     assert.equal(h.children.length, 3);
     assert.ok(!h.children[2].args.includes("--conversation"));
 });
-test("real Pi persisted restart resumes only complete native tip", async (t) => {
+test("real Pi persisted restart bootstraps without native resume", async (t) => {
     const h = await ownershipHarness(true);
     t.after(() => h.close());
     await turn(h, "X");
     const file = h.session.sessionFile;
     const message = h.session.state.messages.at(-1);
-    assert.equal(message.agyPoolOwner.sessionId, h.session.sessionId);
+    assert.equal(message.responseId, "X");
     await h.host.dispose();
     await resetActiveProcesses();
     await h.reopen(file);
     await turn(h, "X");
-    assert.equal(h.children.at(-1)!.args[h.children.at(-1)!.args.indexOf("--conversation") + 1], "X");
+    assert.ok(!h.children.at(-1)!.args.includes("--conversation"));
 });
 for (const point of ["tip", "older"]) {
     test(`real Pi restart then fork ${point} cannot resume historical X`, async (t) => {
@@ -110,14 +110,14 @@ test("real Pi switch A to B preserves independent process owner", async (t) => {
     await turn(b, "Y");
     assert.equal(b.children.length, 1);
 });
-test("real Pi reload resumes same owned native tip", async (t) => {
+test("real Pi reload loses ownership and bootstraps fresh", async (t) => {
     const h = await ownershipHarness();
     t.after(() => h.close());
     await turn(h, "X");
     await h.session.reload();
     await turn(h, "X");
     const args = h.children.at(-1)!.args;
-    assert.equal(args[args.indexOf("--conversation") + 1], "X");
+    assert.ok(!args.includes("--conversation"));
 });
 for (const action of ["fork", "switch"]) {
     test(`real Pi cancelled ${action} preserves current process`, async (t) => {
@@ -133,3 +133,13 @@ for (const action of ["fork", "switch"]) {
         assert.equal(h.children.length, 1);
     });
 }
+
+test("real Pi copied historical receipt on an older branch cannot restore mutable X", async t => {
+    const h = await ownershipHarness(true); t.after(() => h.close());
+    const a1 = await turn(h, "X"); const message = h.session.sessionManager.getEntry(a1).message;
+    await turn(h, "X"); await turn(h, "X");
+    h.session.sessionManager.branch(a1);
+    h.session.sessionManager.appendMessage({ ...structuredClone(message), agyPoolOwner: { sessionId: h.session.sessionId, checkpoint: "legacy-copied-tip" } });
+    const file = h.session.sessionFile; await h.host.dispose(); await resetActiveProcesses(); await h.reopen(file);
+    await turn(h, "Y"); assert.ok(!h.children.at(-1)!.args.includes("--conversation"));
+});

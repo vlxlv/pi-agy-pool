@@ -1,33 +1,32 @@
-# CP2 ownership design
+# CP2.1 conservative ownership
 
-Pi sessionId is the routing identity. A session ownership record owns its current process, native conversation ID and last successful checkpoint. The process registry additionally retains retiring children until exit; a conversation index is diagnostic, never routing authority.
-
-Pi provider/API fields establish provider provenance. Successful assistant messages additionally carry agyPoolOwner { sessionId, checkpoint }. responseId remains the mutable native conversation ID, not the checkpoint. The checkpoint is an adapter receipt, not an AGY protocol correlation ID.
-
-A registered provider may authorize restart resume only when the latest relevant assistant receipt in the current projection matches the latest receipt in the real SessionManager entries and belongs to the same session/provider/API. A fork changes sessionId, so both tip and older forks bootstrap fresh. Tree navigation retires ownership. Historical IDs alone, legacy messages without receipts, and direct calls without a session ID bootstrap conservatively. Concurrent calls for one session reserve the same record before yielding.
-
-Pi 0.87.1 AgentSessionRuntime calls cancellable before-switch/fork hooks before teardown; successful replacement aborts then emits session_shutdown and creates a new runner/session_start. Fork creates a new sessionId; navigateTree updates projection before session_tree. Cleanup belongs to the outgoing session, never the last globally active session. Reload releases its process and uses persisted receipts for safe reattachment.
-
-Known bootstrap system prompt sections, branch-summary text, toolResult fidelity and role serialization remain CP3. This change does not alter the CP1 turn queue or native protocol.
-
-## Ownership and lifetime
+## Live continuity versus historical provenance
 
 ```text
-real AgentSession / ExtensionRunner token
-  -> explicit options.sessionId
-  -> SessionOwnership (process, native ID, successful receipt, bootstrap flag)
+live ExtensionRunner token + explicit Pi sessionId
+  -> SessionOwnership (current process, native ID, canResume, bootstrap state)
   -> AgyProcess
 
-historical responseId + provider/API + same-session tip receipt
-  -> candidate for a NEW process only
+persisted assistant provider/API + responseId (+ legacy agyPoolOwner, ignored)
+  -> historical provenance only; NEVER native resume authority
 ```
 
-The runner token is captured in each spawned-child registration. Shutdown aborts its own requests and awaits all of its children, including those still initializing or retiring. Late invalidation/init/exit callbacks change session state only while that exact process remains its owner. A second runner opening the same session file cannot borrow the first runner's live process.
+Only in-memory ownership may supply `--conversation`. Normal same-session turns reuse their healthy process. For a new process to resume X, the same owner must retain X, ownership must not have been retired or released, and `canResume` must establish a successful terminal result with no queued/native turn left unresolved. The flag is revoked when another request starts and restored only by successful completion with an empty FIFO. Process death while any caller is pending invalidates continuity. A preparation-only failure may conservatively forfeit replacement reuse as well.
 
-Requests not bound to the runner's actual session (including Pi's separately identified compaction helper requests), and direct callers without a session ID, use independent ephemeral ownership and terminate after completion. They do not mint resumable receipts. Explicit-ID direct callers can reuse only their own in-memory ownership; historical resume additionally requires an explicitly verified receipt. Legacy pre-CP2 messages have no receipt, so the first continuation bootstraps once, then resumes normal persistent reuse.
+An idle process exit (including a nonzero exit or signal between completed turns) can preserve this known boundary. Idle model/effort replacement can resume X and waits for the old process to exit before writing. Busy/unresolved replacement bootstraps fresh. The CP1 FIFO and native protocol are unchanged; the pending count is not a scheduler.
 
-Successful idle shutdown/reload preserves the receipt for a new process. Active failure/cancellation invalidates the native checkpoint. Idle model/effort replacement preserves the same owned native conversation and waits for the old child's exit before writing. Busy replacement retires the native conversation: interrupted work may have advanced beyond Pi's completed projection. A pending caller count is only a checkpoint-invalidation guard, never a scheduler; the unchanged CP1 FIFO is the only turn scheduler.
+## Ownership loss
 
-Tree changes invalidate immediately. Across restart, a projection receipt must also equal the chronologically latest successful provider receipt in the full persisted tree. This rejects an older/sibling projection with native future history. Pi's bare in-memory leaf navigation is not itself persisted; the integration test persists a custom entry at the selected leaf before reopening, using Pi's own SessionManager implementation.
+Clean Pi restart, crash/SIGKILL, reconstructed sessions and extension reload bootstrap a fresh native conversation from the current Pi projection. This also prevents a second Node process opening the same session file from resuming another process's mutable native X. No cross-process lock or transcript hash is needed.
 
-Existing compaction detection and its retired/post-compaction indexes remain unchanged in meaning. They are not live-process routing authorities. CP2 does not repair false-positive compaction detection or bootstrap contents.
+`agyPoolOwner` was removed: provider/API fields already identify historical provider provenance, while the live session record and runner token identify ownership. Old receipt fields are ignored, including copied receipts or receipts attached to a changed responseId. `responseId` remains the historical native conversation identity for Pi/diagnostics; it is not a resume credential. Legacy and CP2 transcripts both bootstrap after ownership loss.
+
+Pi 0.87.1 reload emits shutdown, invalidates the runner and rebuilds extensions. Shutdown revokes all that runner's resume authority, including idle records whose child already exited. A new runner cannot inherit an old record by matching sessionId. There is no ownership transfer on reload or switch.
+
+Both tip and old-point forks bootstrap fresh. Tree changes retire ownership. Successful switches release the outgoing runner; cancelled before-switch/fork hooks retain process ownership. Actual Pi lifecycle hooks, rather than persisted receipt comparisons, establish these branch boundaries. Direct callers with explicit IDs must retain their session lineage and retire it on branch changes; ambiguous/unbound calls use isolated ephemeral ownership.
+
+Process registration captures the runner token. Init/invalidation/exit updates require the exact process owner; shutdown only terminates its own registered children. Ephemeral requests await child termination and remove their session and conversation indexes. The conversation index remains diagnostic, never a routing authority.
+
+## Deferred CP3
+
+Fresh bootstrap still uses the existing serializer. System prompt sections, branch-summary content semantics, toolResult fidelity and role serialization are deliberately unchanged. Compaction detection (including existing false positives), cwd, retries, usage, diagnostics, host signals, model/effort semantics and release/version handling are not redesigned here.
