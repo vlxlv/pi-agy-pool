@@ -87,7 +87,7 @@ test("separate real session bindings and overlapping request tokens cannot steal
   assert.equal(ua.status(), "AGY: Reading file…");
   assert.equal(ub.status(), "AGY: Running command…");
 
-  const newer = start(b);
+  const newer = b.provider.streamSimple(b.model, {messages:[...context.messages,{role:"assistant",provider:"agy-pool",api:"agy-pool-api",content:[]},...context.messages]}, {sessionId:b.session.sessionId});
   assert.equal(b.children.length, 1, "overlap queues on the existing child");
   assert.equal(ub.status(), "AGY: Working…");
   await drain();

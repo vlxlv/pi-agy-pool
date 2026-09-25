@@ -141,8 +141,9 @@ test("submission: real stream payload cancellation releases the FIFO head", asyn
   const context = { messages: [{ role: "user", content: "prompt", timestamp: 0 }] } as TranscriptContext;
   const options = { sessionId: "payload", spawnFn: f.spawnFn };
   const a = streamSimple(model, context, options); f.init(); await drain(); f.confirm(); await drain();
-  const b = streamSimple(model, context, { ...options, signal: controller.signal, onPayload: () => gate.promise });
-  const c = streamSimple(model, context, options);
+  const next = { messages: [...context.messages, {role:"assistant",provider:model.provider,api:model.api,content:[{type:"text",text:"A"}]}, ...context.messages] } as any;
+  const b = streamSimple(model, next, { ...options, signal: controller.signal, onPayload: () => gate.promise });
+  const c = streamSimple(model, next, options);
   f.result("A"); await a.result(); await drain();
   f.result("stale"); await drain(); assert.equal(f.writes.length, 1);
   controller.abort(); assert.equal((await b.result()).stopReason, "aborted"); await drain();

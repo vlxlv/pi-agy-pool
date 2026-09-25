@@ -98,7 +98,7 @@ test("ownership same-session concurrent acquisition", async () => {
     let n = 0;
     const spawnFn: any = (...args: any[]) => { n++; return f.spawnFn(...args); };
     const a = streamSimple(model, { messages: [user] } as any, { sessionId: "A", spawnFn });
-    const b = streamSimple(model, { messages: [user] } as any, { sessionId: "A", spawnFn });
+    const b = streamSimple(model, { messages: [user, {role:"assistant",provider:model.provider,api:model.api,content:[]}, user] } as any, { sessionId: "A", spawnFn });
     assert.equal(n, 1);
     f.init("X");
     await drain();

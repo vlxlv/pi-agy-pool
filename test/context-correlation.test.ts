@@ -62,7 +62,7 @@ test("CP3.1 system: canonical equivalence reuses; patch/delete retires; stable s
  const spawnFn:any=(_:string,a:string[])=>{args.push(a);const c=new FakeAgy();children.push(c);return c};
  const model:any={...MODELS[0],api:API_IDENTIFIER,provider:"agy-pool"};
  const initial=sys("",{preamble:"BASE",extra:"EXTRA"});let history:any[]=[];
- async function turn(systems:any[]){const before=children.length;const context=normalizeContext({messages:[...systems,...history,{role:"user",content:"LATEST",timestamp:5}]});const r=streamSimple(model,context,{sessionId:"canon",spawnFn});const c=children.at(-1)!;if(children.length>before)c.send({event:"init",conversation_id:`N${children.length}`});await tick();c.result();history.push(await r.result());}
+ async function turn(systems:any[]){const before=children.length;const context=normalizeContext({messages:[...systems,...history,{role:"user",content:"LATEST",timestamp:5}]});const r=streamSimple(model,context,{sessionId:"canon",spawnFn});const c=children.at(-1)!;if(children.length>before)c.send({event:"init",conversation_id:`N${children.length}`});await tick();c.result();history.push({role:"user",content:"LATEST",timestamp:5},await r.result());}
  try {
   await turn([initial]);assert.equal(children.length,1);
   await turn([sys("BASE\n\nEXTRA")]);assert.equal(children.length,1);

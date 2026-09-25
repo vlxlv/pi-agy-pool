@@ -72,7 +72,7 @@ test("CP1 concurrent same-session acquisition spawns once", async () => {
   const spawned: ReturnType<typeof child>[] = [];
   const spawnFn = (() => { const f = child(); spawned.push(f); return f.c; }) as typeof spawn;
   const a = streamSimple(model, context, { sessionId: "same", spawnFn });
-  const b = streamSimple(model, context, { sessionId: "same", spawnFn });
+  const b = streamSimple(model, { messages: [...context.messages, {role:"assistant",provider:model.provider,api:model.api,content:[{type:"text",text:"A"}]}, ...context.messages] } as any, { sessionId: "same", spawnFn });
   assert.equal(spawned.length, 1);
   spawned[0].init(); await drain();
   assert.equal(spawned[0].writes.length, 1);

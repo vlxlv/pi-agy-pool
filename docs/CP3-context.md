@@ -60,3 +60,35 @@ BASE twice, bootstrap preserves both copies. The full ordered projection is
 passed to Pi, including conversational boundaries. This same function drives
 bootstrap and system-change retirement; equivalent rendered strings reuse the
 process, changed strings force fresh bootstrap. There is no second system path.
+
+## RC1 bootstrap establishment and projection continuity
+
+A live/initialized child is not proof that Pi bootstrap was submitted.
+`bootstrapEstablished` changes to true only in the CP1 successful stdin write
+callback for the canonical input. Preparing, cancelled and failed writes cannot
+establish it. Preparation is lazy at the existing FIFO head, so a queued request
+can supply the full bootstrap if its predecessor never submitted one.
+
+After terminal success, `projectionCheckpoint` stores SHA-256 of the JSON encoding
+of CP3's canonical records for the submitted projection plus the assistant response
+returned by this adapter. The snapshot is detached before the payload hook. It
+contains the rendered authoritative system and semantic message/tool records,
+including bootstrap-local tool references; timestamps, response IDs, usage and
+ownership metadata do not participate. It adds no persisted resume credential.
+
+For continuation, remove exactly the last non-system message (which must be a user
+message), canonicalize the remaining current Pi projection, and compare its hash
+to the checkpoint. Normal history + our assistant response + one user request
+therefore remains latest-only. System or historical edits, deletions, extra context,
+changed tool results and summaries use the existing fresh-conversation boundary.
+This check occurs before idle model/effort/cwd replacement may select --conversation.
+Queued requests are checked again against their completed predecessor at the FIFO
+head. An incompatible queued projection fails before submission and retires that
+ambiguous conversation; it is not automatically replayed.
+
+Only CP2-proven idle native continuity transfers the checkpoint to a replacement.
+Every new child without --conversation starts unestablished. Retirement, ownership
+release, compaction/tree and pending-process failure clear both fields. Historical
+transcripts never reconstruct either field. A changed onPayload replacement is
+honored, but cannot prove the unchanged Pi projection was represented, so its
+conversation is retired after completion rather than reused under a false checkpoint.

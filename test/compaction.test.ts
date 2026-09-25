@@ -444,7 +444,7 @@ describe("Compaction Support", () => {
     await drain();
     mockB.stdout.write(JSON.stringify({ event: "init", conversation_id: "conv-b" }) + "\n");
     await drain();
-    mockB.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
+    mockB.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS", result: {response:"B1 reply"} }) + "\n");
     for await (const _ of sB) {}
 
     assert.strictEqual(activeProcesses.has("conv-a"), true);

@@ -21,7 +21,8 @@ export interface AgyProcessOptions {
 }
 
 interface Turn {
-  prompt: string | Promise<string>;
+  prompt: string | Promise<string> | (() => Promise<string>);
+  onSubmitted?: () => void;
   onEvent: (event: AgyEvent) => void;
   resolve: (result: AgyResultEvent) => void;
   reject: (error: Error) => void;
@@ -251,13 +252,13 @@ export class AgyProcess extends EventEmitter {
   }
 
   /** The array owns FIFO preparation; only a write-confirmed head owns results. */
-  runTurn(prompt: string | Promise<string>, onEvent: (event: AgyEvent) => void, signal?: AbortSignal): Promise<AgyResultEvent> {
+  runTurn(prompt: Turn["prompt"], onEvent: (event: AgyEvent) => void, signal?: AbortSignal, onSubmitted?: () => void): Promise<AgyResultEvent> {
     // A queued payload may reject before reaching the head.
-    if (typeof prompt !== "string") void prompt.catch(() => {});
+    if (typeof prompt === "object") void prompt.catch(() => {});
     if (signal?.aborted) return Promise.reject(new Error("Request was aborted"));
     if (!this.isAlive()) return Promise.reject(this.failure || new Error("AGY process is not alive"));
     return new Promise((resolve, reject) => {
-      const turn: Turn = { prompt, onEvent, resolve, reject, cleanup: () => signal?.removeEventListener("abort", cancel), phase: "queued" };
+      const turn: Turn = { prompt, onSubmitted, onEvent, resolve, reject, cleanup: () => signal?.removeEventListener("abort", cancel), phase: "queued" };
       const cancel = () => {
         if (this.turns[0] === turn && (turn.phase === "writing" || turn.phase === "submitted")) {
           void this.abort();
@@ -280,7 +281,10 @@ export class AgyProcess extends EventEmitter {
     const turn = this.turns[0];
     if (!turn || turn.phase !== "queued" || !this.isAlive()) return;
     turn.phase = "preparing";
-    void Promise.all([this.ready, turn.prompt]).then(([, prompt]) => {
+    void Promise.all([this.ready, Promise.resolve().then(() => {
+      if (this.turns[0] !== turn || !this.isAlive()) return "";
+      return typeof turn.prompt === "function" ? turn.prompt() : turn.prompt;
+    })]).then(([, prompt]) => {
       if (this.turns[0] !== turn || !this.isAlive()) return;
       const stdin = this.child.stdin;
       if (!stdin || stdin.destroyed || !stdin.writable) {
@@ -298,6 +302,10 @@ export class AgyProcess extends EventEmitter {
           void this.terminate("SIGINT");
         } else if (this.turns[0] === turn && this.isAlive()) {
           turn.phase = "submitted";
+          try { turn.onSubmitted?.(); } catch (error) {
+            this.invalidate(error instanceof Error ? error : new Error(String(error)));
+            void this.terminate("SIGINT");
+          }
         }
       });
     }).catch(error => {

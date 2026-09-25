@@ -54,12 +54,25 @@ integration is tested against Pi 0.87.1.
 
 ## Installation
 
-Download the release `.tgz` artifact from [GitHub Releases](https://github.com/vlxlv/pi-agy-pool/releases) and install it using Pi:
+The recommended Pi 0.87.1+ installation uses Git and tracks the repository's default branch:
 
 ```bash
-# Install from downloaded release tarball
-pi install /path/to/pi-agy-pool-X.Y.Z.tgz
+pi install git:github.com/vlxlv/pi-agy-pool
 ```
+
+For a specific release artifact, download its npm-compatible `.tgz` archive from
+[GitHub Releases](https://github.com/vlxlv/pi-agy-pool/releases), extract it into a
+persistent directory, then install the extracted `package/` directory:
+
+```bash
+mkdir -p "$HOME/.local/share/pi-agy-pool/X.Y.Z"
+tar -xzf ./pi-agy-pool-X.Y.Z.tgz -C "$HOME/.local/share/pi-agy-pool/X.Y.Z"
+pi install "$HOME/.local/share/pi-agy-pool/X.Y.Z/package"
+```
+
+Replace `X.Y.Z` with the downloaded version. Pi keeps a reference to this directory;
+keep it after installation. Direct `.tgz` installation is unsupported by Pi 0.87.1.
+Choose one installation source to avoid registering the extension twice.
 
 Verify that Pi has automatically discovered the extension and registered the models:
 
@@ -86,12 +99,19 @@ agy-pool  gpt-oss-120b-medium       131.1K   32.8K    no        no
 # List installed packages
 pi list
 
-# Update package by reinstalling new release tarball
-pi install /path/to/pi-agy-pool-X.Y.Z.tgz
+# Update a Git installation
+pi update git:github.com/vlxlv/pi-agy-pool
 
-# Uninstall package
-pi remove pi-agy-pool
+# Remove a Git installation using its exact source
+pi remove git:github.com/vlxlv/pi-agy-pool
+
+# Remove an extracted release installation using its directory source
+pi remove "$HOME/.local/share/pi-agy-pool/X.Y.Z/package"
 ```
+
+For an archive update, remove the old directory source, then extract and install
+the new version using the commands above. `pi update` does not download new local
+archives. `pi list` shows configured sources; use the matching source for removal.
 
 ### Development & Debugging
 
@@ -100,6 +120,8 @@ During local development or debugging, you can install directly from a local che
 ```bash
 # Install from local source checkout
 pi install ./path/to/pi-agy-pool
+# Remove from the same working directory:
+pi remove ./path/to/pi-agy-pool
 
 # Or test directly with -e without installation
 pi -e ./src/index.ts --model agy-pool/gemini-3.8-flash -p "Reply with OK"
@@ -166,16 +188,17 @@ pi --model agy-pool/gemini-3.1-pro:low -p "Summarize diff"
 | Environment Variable | Description | Default |
 | :--- | :--- | :--- |
 | `AGY_POOL_BIN` | Path or command name for the `agy-pool` CLI | `agy-pool` |
-| `AGY_POOL_EFFORT` | Reasoning effort override (`low`, `medium`, `high`) | Model-specific native default |
+| `AGY_POOL_EFFORT` | Reasoning effort fallback below explicit Pi reasoning (`low`, `medium`, `high`) | Model-specific native default |
 
 ---
 
 ## Lifecycle, Concurrency & Process Isolation
 
 - **Process Ownership:** Each Pi conversation owns a dedicated AGY child process.
-- **Session Continuity:** Captures AGY's `init.conversation_id` and transparently resumes across turns or process restarts using `--conversation <id>`.
-- **Model / Effort Switching:** If a session changes model or effort between turns, the mismatched process is cleanly terminated and a new process is spawned with `--conversation <id>`, preserving conversation history with the new model configuration.
-- **Signal Ownership:** Cleans up active child processes on Pi `session_shutdown` and process exit without hijacking host signal semantics (does not unconditionally exit on Ctrl+C).
+- **Session Continuity:** Normal turns continue within the same in-memory ownership lifetime. Pi/extension restart or ownership loss starts a fresh AGY conversation from Pi's current projection; historical conversation IDs never authorize resume.
+- **Context Continuity:** Bootstrap is established only after successful native input submission. After a successful turn, a canonical projection checkpoint permits latest-only continuation only for unchanged history plus the next user request. System/history edits or injected context require fresh bootstrap from Pi's current projection.
+- **Model / Effort Switching:** Proven idle ownership and an unchanged projection permit child replacement with `--conversation <id>`. Busy, ambiguous or stale context requires fresh bootstrap. The same rule applies to cwd/environment replacement.
+- **Cleanup:** Request AbortSignal, Pi `session_shutdown` and extension reload own cleanup. No process-global signal/exit hooks are installed; abrupt host termination is not a graceful-cleanup guarantee.
 - **Telemetry Boundary:** Official AGY executes tools and subagents autonomously. Telemetry events are never translated into Pi tool calls, preventing double execution.
 
 ---
@@ -243,6 +266,11 @@ input/output/cache-read values map directly to Pi's corresponding fields;
 thinking is reported as the reasoning breakdown, never added again to output.
 A valid native total is authoritative even if it differs from category sums;
 when absent, total is input + output + cacheRead. No billing/cost is inferred.
+
+Ordinary session records and retired/valid conversation IDs currently remain in
+memory until the host exits, including retained system prompts. This process-wide
+metadata accumulation is a known non-blocking limitation for long-lived hosts;
+child processes and request resources are still released on shutdown.
 
 ## License
 

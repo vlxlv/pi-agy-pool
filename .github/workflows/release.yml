@@ -53,40 +53,7 @@ jobs:
 
       - name: Verify tarball contents
         run: |
-          node -e '
-            const { execSync } = require("child_process");
-            const tarball = process.env.TARBALL_FILE;
-            if (!tarball) {
-              console.error("TARBALL_FILE environment variable not set");
-              process.exit(1);
-            }
-            const output = execSync(`tar -tf "${tarball}"`, { encoding: "utf8" });
-            const files = output.trim().split("\n").filter(Boolean).map(f => f.replace(/^package\//, "")).filter(Boolean).sort();
-            const expected = [
-              "LICENSE",
-              "README.md",
-              "package.json",
-              "src/agy-events.ts",
-              "src/agy-process.ts",
-              "src/index.ts",
-              "src/models.ts",
-              "src/provider.ts",
-              "src/stream.ts"
-            ].sort();
-            console.log("Tarball files count:", files.length);
-            console.log("Tarball files:", files);
-            if (files.length !== expected.length || !files.every((f, i) => f === expected[i])) {
-              console.error("Tarball verification failed: unexpected files list", { files, expected });
-              process.exit(1);
-            }
-            for (const forbidden of ["test", "AGENTS.md", "tsconfig.json", ".github", ".git"]) {
-              if (files.some(f => f.includes(forbidden))) {
-                console.error("Tarball verification failed: forbidden pattern found:", forbidden);
-                process.exit(1);
-              }
-            }
-            console.log("Tarball verification PASSED.");
-          '
+          node scripts/verify-package.mjs "$TARBALL_FILE"
 
       - name: Create GitHub Release and attach tarball
         env:
@@ -100,10 +67,25 @@ jobs:
 
           ## Installation
 
-          Download the release `.tgz` artifact below and install with Pi:
+          Recommended Git installation (tracks the repository default branch):
 
           ```bash
-          pi install ./pi-agy-pool-${VERSION}.tgz
+          pi install git:github.com/vlxlv/pi-agy-pool
+          pi update git:github.com/vlxlv/pi-agy-pool
+          # Remove using the same source:
+          pi remove git:github.com/vlxlv/pi-agy-pool
+          ```
+
+          The attached `.tgz` is an npm-compatible release archive. Pi 0.87.1
+          requires extraction before local-directory installation; it cannot load
+          the archive directly. Keep the extracted directory after installation.
+
+          ```bash
+          mkdir -p "$HOME/.local/share/pi-agy-pool/${VERSION}"
+          tar -xzf ./pi-agy-pool-${VERSION}.tgz -C "$HOME/.local/share/pi-agy-pool/${VERSION}"
+          pi install "$HOME/.local/share/pi-agy-pool/${VERSION}/package"
+          # Remove using the same directory source:
+          pi remove "$HOME/.local/share/pi-agy-pool/${VERSION}/package"
           ```
 
           ## Architecture
