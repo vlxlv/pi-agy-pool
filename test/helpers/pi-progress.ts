@@ -129,11 +129,26 @@ export async function attachTui(h: Awaited<ReturnType<typeof createHarness>>) {
   mode.mountInteractiveTui(mode.renderer, [mode.chatContainer, mode.statusContainer, mode.editorContainer, mode.footerContainer]);
   mode.isInitialized = true;
   mode.ui.start();
-  await h.session.bindExtensions({ mode: "tui", uiContext: mode.createExtensionUIContext() });
+  const uiContext = mode.createExtensionUIContext();
+  const statusWrites: Array<[string, string | undefined]> = [];
+  const workingWrites: Array<string | undefined> = [];
+  const setStatus = uiContext.setStatus;
+  const setWorkingMessage = uiContext.setWorkingMessage;
+  uiContext.setStatus = (key: string, value: string | undefined) => {
+    statusWrites.push([key, value]); setStatus(key, value);
+  };
+  uiContext.setWorkingMessage = (value: string | undefined) => {
+    workingWrites.push(value); setWorkingMessage(value);
+  };
+  // Exercise migration of a previous extension instance's footer key.
+  setStatus("agy-pool", "legacy AGY status");
+  setStatus("ponytail", "ponytail: full");
+  await h.session.bindExtensions({ mode: "tui", uiContext });
   mode.subscribeToAgent();
   return {
-    mode, terminal,
-    status: () => mode.footerDataProvider.getExtensionStatuses().get("agy-pool"),
+    mode, terminal, statusWrites, workingWrites,
+    status: () => mode.workingMessage,
+    footerStatus: () => mode.footerDataProvider.getExtensionStatuses(),
     async close() {
       mode.unsubscribe?.();
       mode.clearStatusIndicator();

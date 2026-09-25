@@ -452,7 +452,7 @@ export type AgyProgressCallback = (message?: string) => void;
 /** Request-local telemetry state. No timer delays AGY or queues historical UI frames. */
 export class AgyProgressAdapter {
   private currentMessage: string | undefined;
-  private activities = new Map<string, string>();
+  private activities = new Map<string, string | undefined>();
   private ended = false;
   private readonly callback: AgyProgressCallback;
 
@@ -493,7 +493,7 @@ export class AgyProgressAdapter {
         : formatSubagentProgress(update.subagent_info));
       if (update.state === "DONE") {
         this.activities.delete(key);
-        this.update([...this.activities.values()].at(-1) ?? label.replace(/…$/, " — done; continuing…"));
+        this.update([...this.activities.values()].at(-1) ?? label?.replace(/…$/, " — done; continuing…"));
       } else {
         this.activities.set(key, label);
         this.update(label);
@@ -503,7 +503,7 @@ export class AgyProgressAdapter {
         this.clear();
       } else {
         // Keep a useful completion label across empty response/usage records.
-        this.update([...this.activities.values()].at(-1) ?? this.currentMessage ?? "AGY: Working…");
+        this.update([...this.activities.values()].at(-1) ?? this.currentMessage);
       }
     }
   }
@@ -519,11 +519,11 @@ export class AgyProgressAdapter {
   }
 }
 
-export function formatToolProgress(toolName?: string): string {
+export function formatToolProgress(toolName?: string): string | undefined {
   if (!toolName) {
-    return "AGY: Running tool…";
+    return undefined;
   }
-  if (typeof toolName !== "string") return "AGY: Running tool…";
+  if (typeof toolName !== "string") return undefined;
   const toolLower = toolName.toLowerCase();
   const normalized = toolLower.replace(/[-_]/g, "");
 
@@ -534,7 +534,7 @@ export function formatToolProgress(toolName?: string): string {
     normalized === "readfile" ||
     normalized === "read"
   ) {
-    return "AGY: Reading file…";
+    return "Reading file…";
   }
 
   if (
@@ -546,11 +546,11 @@ export function formatToolProgress(toolName?: string): string {
     normalized === "shell" ||
     normalized === "terminal"
   ) {
-    return "AGY: Running command…";
+    return "Running command…";
   }
 
   if (["codesearch", "searchcode", "grep", "find"].includes(normalized)) {
-    return "AGY: Searching code…";
+    return "Searching…";
   }
 
   if (
@@ -558,7 +558,7 @@ export function formatToolProgress(toolName?: string): string {
     normalized.startsWith("search") ||
     normalized === "websearch"
   ) {
-    return "AGY: Searching…";
+    return "Searching…";
   }
 
   if (
@@ -566,14 +566,14 @@ export function formatToolProgress(toolName?: string): string {
     normalized.startsWith("edit") ||
     normalized === "replacefilecontent"
   ) {
-    return "AGY: Editing file…";
+    return "Editing file…";
   }
 
   if (
     toolLower.startsWith("write") ||
     normalized.startsWith("write")
   ) {
-    return "AGY: Writing file…";
+    return "Writing file…";
   }
 
   if (
@@ -581,18 +581,18 @@ export function formatToolProgress(toolName?: string): string {
     normalized === "listdirectory" ||
     normalized === "directoryanalysis"
   ) {
-    return "AGY: Inspecting directory…";
+    return "Inspecting directory…";
   }
 
   if (normalized === "invokesubagent") {
-    return "AGY: Running subagent…";
+    return undefined;
   }
 
   // Unknown names may contain paths or secrets; never echo them.
-  return "AGY: Running tool…";
+  return undefined;
 }
 
-export function formatSubagentProgress(info?: { subagents?: Array<{ role?: string; type_name?: string }> }): string {
+export function formatSubagentProgress(info?: { subagents?: Array<{ role?: string; type_name?: string }> }): string | undefined {
   const first = info?.subagents?.[0];
   const role = typeof first?.role === "string" ? first.role.trim() : "";
   const typeName = typeof first?.type_name === "string" ? first.type_name.trim() : "";
@@ -606,7 +606,7 @@ export function formatSubagentProgress(info?: { subagents?: Array<{ role?: strin
   };
   const key = candidate.toLowerCase();
   const label = candidate.length <= 30 && Object.hasOwn(roles, key) ? roles[key] : undefined;
-  return label ? `AGY: ${label} subagent…` : "AGY: Running subagent…";
+  return label ? `${label} subagent…` : undefined;
 }
 
 export interface ExtendedStreamOptions extends SimpleStreamOptions {
@@ -681,7 +681,7 @@ export function streamSimple(
         throw new Error("Request was aborted");
       }
 
-      progressAdapter.update("AGY: Working…");
+      progressAdapter.clear();
       const sessionState = activeSid ? getSessionState(activeSid) : undefined;
 
       const compaction = detectCompaction(context);
@@ -803,7 +803,7 @@ export function streamSimple(
       const handleEvent = (event: AgyEvent) => {
         if (event.event === "init") {
           bindInit();
-          progressAdapter.update("AGY: Working…");
+          progressAdapter.clear();
         } else if (event.event === "step_update") {
           const update = (event as { step_update?: AgyStepUpdatePayload }).step_update;
           if (!update) return;

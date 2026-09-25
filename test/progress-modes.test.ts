@@ -25,7 +25,7 @@ for (const mode of ["print", "json", "rpc"]) {
     clearTimeout(timeout);
     assert.equal(code, 0, stderr);
     assert.equal(stderr, "");
-    assert(!stdout.includes("AGY:"));
+    assert(!/AGY:|Working…|Reading file|Running subagent|done; continuing/.test(stdout));
     if (mode === "print") assert.equal(stdout.trim(), "Offline answer.");
     else {
       const records = stdout.trim().split("\n").map((line) => JSON.parse(line));

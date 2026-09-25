@@ -63,7 +63,7 @@ export function registerAgyPoolProvider(
     binding = undefined;
     old.live = false;
     old.requests.clear();
-    old.ui.setStatus("agy-pool", undefined);
+    old.ui.setWorkingMessage(undefined);
   };
   const bindProgress = (_event: unknown, ctx: ExtensionContext) => {
     const sessionId = ctx.sessionManager.getSessionId();
@@ -73,6 +73,8 @@ export function registerAgyPoolProvider(
     }
     if (binding?.live && binding.sessionId === sessionId && binding.ui === ctx.ui) return;
     invalidateProgress();
+    // Remove the legacy footer slot once when binding; progress uses Pi's working row.
+    ctx.ui.setStatus("agy-pool", undefined);
     binding = { sessionId, ui: ctx.ui, context: ctx, live: true, requests: new Map() };
   };
 
@@ -162,7 +164,7 @@ export function registerAgyPoolProvider(
               owner.requests.clear();
               return;
             }
-            owner.ui.setStatus("agy-pool", [...owner.requests.values()].at(-1));
+            owner.ui.setWorkingMessage([...owner.requests.values()].at(-1));
           } catch {
             // A disposed UI must not reject stream completion or interrupt AGY.
             owner.live = false;
@@ -170,6 +172,8 @@ export function registerAgyPoolProvider(
           }
         }
       };
+      // A newly owning request starts with Pi's default working message.
+      render();
       const finish = () => {
         requests.delete(controller);
         streamOptions?.signal?.removeEventListener("abort", finish);

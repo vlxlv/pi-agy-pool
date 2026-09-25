@@ -92,28 +92,28 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
 
     await stream.result();
-    assert.strictEqual(progressList.includes("AGY: Running command…"), true);
+    assert.strictEqual(progressList.includes("Running command…"), true);
   });
 
   // 2. known tool receives friendly label
   it("2. known tool receives friendly label", () => {
-    assert.strictEqual(formatToolProgress("view_file"), "AGY: Reading file…");
-    assert.strictEqual(formatToolProgress("read_file"), "AGY: Reading file…");
-    assert.strictEqual(formatToolProgress("run_command"), "AGY: Running command…");
-    assert.strictEqual(formatToolProgress("bash"), "AGY: Running command…");
-    assert.strictEqual(formatToolProgress("search_web"), "AGY: Searching…");
-    assert.strictEqual(formatToolProgress("search"), "AGY: Searching…");
-    assert.strictEqual(formatToolProgress("code_search"), "AGY: Searching code…");
-    assert.strictEqual(formatToolProgress("edit_file"), "AGY: Editing file…");
-    assert.strictEqual(formatToolProgress("replace_file_content"), "AGY: Editing file…");
-    assert.strictEqual(formatToolProgress("write_to_file"), "AGY: Writing file…");
-    assert.strictEqual(formatToolProgress("list_dir"), "AGY: Inspecting directory…");
+    assert.strictEqual(formatToolProgress("view_file"), "Reading file…");
+    assert.strictEqual(formatToolProgress("read_file"), "Reading file…");
+    assert.strictEqual(formatToolProgress("run_command"), "Running command…");
+    assert.strictEqual(formatToolProgress("bash"), "Running command…");
+    assert.strictEqual(formatToolProgress("search_web"), "Searching…");
+    assert.strictEqual(formatToolProgress("search"), "Searching…");
+    assert.strictEqual(formatToolProgress("code_search"), "Searching…");
+    assert.strictEqual(formatToolProgress("edit_file"), "Editing file…");
+    assert.strictEqual(formatToolProgress("replace_file_content"), "Editing file…");
+    assert.strictEqual(formatToolProgress("write_to_file"), "Writing file…");
+    assert.strictEqual(formatToolProgress("list_dir"), "Inspecting directory…");
   });
 
   // 3. unknown tool receives safe fallback
   it("3. unknown tool receives safe fallback", async () => {
-    assert.strictEqual(formatToolProgress("custom_analyzer"), "AGY: Running tool…");
-    assert.strictEqual(formatToolProgress(undefined), "AGY: Running tool…");
+    assert.strictEqual(formatToolProgress("custom_analyzer"), undefined);
+    assert.strictEqual(formatToolProgress(undefined), undefined);
 
     const mock = createMockChildProcess();
     const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
@@ -131,7 +131,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
 
     await stream.result();
-    assert.strictEqual(progressList.includes("AGY: Running tool…"), true);
+    assert.deepStrictEqual(progressList, []);
   });
 
   // 4. tool output is never displayed
@@ -189,9 +189,9 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
 
   // 6. subagent event produces progress
   it("6. subagent event produces progress", async () => {
-    assert.strictEqual(formatSubagentProgress({ subagents: [{ role: "Code Reviewer" }] }), "AGY: Code Reviewer subagent…");
-    assert.strictEqual(formatSubagentProgress({ subagents: [{ role: "Research subagent" }] }), "AGY: Research subagent…");
-    assert.strictEqual(formatSubagentProgress(undefined), "AGY: Running subagent…");
+    assert.strictEqual(formatSubagentProgress({ subagents: [{ role: "Code Reviewer" }] }), "Code Reviewer subagent…");
+    assert.strictEqual(formatSubagentProgress({ subagents: [{ role: "Research subagent" }] }), "Research subagent…");
+    assert.strictEqual(formatSubagentProgress(undefined), undefined);
 
     const mock = createMockChildProcess();
     const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
@@ -209,7 +209,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
 
     await stream.result();
-    assert.strictEqual(progressList.includes("AGY: Architecture Auditor subagent…"), true);
+    assert.strictEqual(progressList.includes("Architecture Auditor subagent…"), true);
   });
 
   // 7. subagent prompt/log URI never displayed
@@ -471,14 +471,13 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     await stream.result();
 
     assert.deepStrictEqual(progressList, [
-      "AGY: Working…",
-      "AGY: Reading file…",
-      "AGY: Reading file — done; continuing…",
-      "AGY: Running command…",
-      "AGY: Running command — done; continuing…",
+      "Reading file…",
+      "Reading file — done; continuing…",
+      "Running command…",
+      "Running command — done; continuing…",
       undefined,
-      "AGY: Searching…",
-      "AGY: Searching — done; continuing…",
+      "Searching…",
+      "Searching — done; continuing…",
       undefined,
     ]);
   });
@@ -504,9 +503,8 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     await stream.result();
 
     assert.deepStrictEqual(progressList, [
-      "AGY: Working…",
-      "AGY: Code Reviewer subagent…",
-      "AGY: Code Reviewer subagent — done; continuing…",
+      "Code Reviewer subagent…",
+      "Code Reviewer subagent — done; continuing…",
       undefined,
     ]);
   });
@@ -542,9 +540,8 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
 
     // Despite multiple ACTIVE events and multiple text deltas, each distinct state is emitted exactly once
     assert.deepStrictEqual(progressList, [
-      "AGY: Working…",
-      "AGY: Reading file…",
-      "AGY: Reading file — done; continuing…",
+      "Reading file…",
+      "Reading file — done; continuing…",
       undefined,
     ]);
   });
@@ -568,12 +565,12 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     // Later tool starts after text has streamed
     await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"ACTIVE","tool_name":"search_web"}}\n');
-    assert.strictEqual(progressList[progressList.length - 1], "AGY: Searching…");
+    assert.strictEqual(progressList[progressList.length - 1], "Searching…");
 
     await drain();
 
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"DONE","tool_name":"search_web"}}\n');
-    assert.strictEqual(progressList[progressList.length - 1], "AGY: Searching — done; continuing…");
+    assert.strictEqual(progressList[progressList.length - 1], "Searching — done; continuing…");
 
     await drain();
 
@@ -587,19 +584,19 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
 it("tracks overlapping step identities and ignores events after terminal cleanup", () => {
   const seen: Array<string | undefined> = [];
   const state = new AgyProgressAdapter((text) => seen.push(text));
-  state.update("AGY: Working…");
+  state.update(undefined);
   state.step({ step_type: "tool", step_index: 1, state: "ACTIVE", tool_name: "read_file" });
   state.step({ step_type: "subagent", step_index: 1, state: "ACTIVE", subagent_info: { subagents: [{ role: "Research" }] } });
   state.step({ step_type: "tool", step_index: 1, state: "DONE" });
-  assert.equal(seen.at(-1), "AGY: Research subagent…");
+  assert.equal(seen.at(-1), "Research subagent…");
   state.step({ step_type: "subagent", step_index: 1, state: "DONE" });
-  assert.equal(seen.at(-1), "AGY: Research subagent — done; continuing…");
+  assert.equal(seen.at(-1), "Research subagent — done; continuing…");
   state.step({ step_type: "agent_response", state: "ACTIVE" });
-  assert.equal(seen.at(-1), "AGY: Research subagent — done; continuing…");
+  assert.equal(seen.at(-1), "Research subagent — done; continuing…");
   state.step({ step_type: "agent_response", text_delta: "answer" });
   assert.equal(seen.at(-1), undefined);
   state.step({ step_type: "tool", step_index: 2, state: "ACTIVE", tool_name: "code_search" });
-  assert.equal(seen.at(-1), "AGY: Searching code…");
+  assert.equal(seen.at(-1), "Searching…");
   state.finish();
   state.step({ step_type: "tool", step_index: 3, state: "ACTIVE" });
   assert.equal(seen.at(-1), undefined);
@@ -607,8 +604,8 @@ it("tracks overlapping step identities and ignores events after terminal cleanup
 
 it("does not echo unknown names, paths, terminal escapes, or free-form roles", () => {
   for (const value of ["/private/credentials", "TOKEN_12345", "\x1b[31msecret", "x".repeat(500), "prompt\ncontents", "constructor", "__proto__"]) {
-    assert.equal(formatToolProgress(value), "AGY: Running tool…");
-    assert.equal(formatSubagentProgress({ subagents: [{ role: value }] }), "AGY: Running subagent…");
+    assert.equal(formatToolProgress(value), undefined);
+    assert.equal(formatSubagentProgress({ subagents: [{ role: value }] }), undefined);
   }
 });
 
@@ -618,10 +615,10 @@ it("uses names when indices are absent and ambiguous DONE does not erase peers",
   state.step({ step_type: "tool", state: "ACTIVE", tool_name: "read_file" });
   state.step({ step_type: "tool", state: "ACTIVE", tool_name: "run_command" });
   state.step({ step_type: "tool", state: "DONE" });
-  assert.equal(seen.at(-1), "AGY: Running command…");
+  assert.equal(seen.at(-1), "Running command…");
   state.step({ step_type: "tool", state: "DONE", tool_name: "read_file" });
-  assert.equal(seen.at(-1), "AGY: Running command…");
+  assert.equal(seen.at(-1), "Running command…");
   state.step({ step_type: "tool", state: "DONE" });
-  assert.equal(seen.at(-1), "AGY: Running command — done; continuing…");
+  assert.equal(seen.at(-1), "Running command — done; continuing…");
   state.finish();
 });

@@ -19,8 +19,11 @@ test("real AgentSession / ExtensionRunner / registered provider / TUI frames", a
   const child = h.children[0];
   child.send({ event: "init", conversation_id: "render-test" });
   await until(() => child.turns === 1, "AGY received prompt");
-  await until(() => ui.terminal.writes.some((s) => s.includes("AGY: Working")), "initial status rendered");
+  await until(() => ui.terminal.writes.some((s) => s.includes("Working")), "initial status rendered");
 
+  const footerBefore = ui.mode.footer.render(120);
+  child.step({ step_type: "tool", step_index: 1, state: "ACTIVE", tool_name: "view_file" });
+  await until(() => ui.terminal.writes.some(s => stripVTControlCharacters(s).includes("Reading file…")), "ACTIVE working indicator rendered");
   const before = ui.terminal.writes.length;
   // One data chunk, no render opportunity between ACTIVE and DONE.
   child.stdout.write([
@@ -29,19 +32,24 @@ test("real AgentSession / ExtensionRunner / registered provider / TUI frames", a
     { event: "step_update", step_update: { step_type: "agent_response", state: "ACTIVE" } },
   ].map((x) => JSON.stringify(x)).join("\n") + "\n");
   await until(() => ui.terminal.writes.slice(before).some((s) =>
-    stripVTControlCharacters(s).includes("AGY: Reading file — done; continuing…")), "completed activity rendered");
-  assert.equal(ui.mode.workingMessage, undefined, "AGY must not customize the native spinner");
+    stripVTControlCharacters(s).includes("Reading file — done; continuing…")), "completed activity rendered");
+  assert.equal(ui.status(), "Reading file — done; continuing…");
+  assert.equal(ui.footerStatus().get("agy-pool"), undefined);
+  assert.equal(ui.footerStatus().get("ponytail"), "ponytail: full");
+  assert.deepEqual(ui.statusWrites, [["agy-pool", undefined]], "only migration clears the legacy footer key");
+  assert.equal(ui.workingWrites[0], undefined);
+  assert.deepEqual(ui.mode.footer.render(120), footerBefore, "progress does not change native footer rendering");
   await drain();
   child.step({ step_type: "agent_response", text_delta: "First. " });
-  await until(() => ui.status() === undefined, "text clears keyed status");
+  await until(() => ui.status() === undefined, "text restores default working message");
   await drain();
   child.step({ step_type: "tool", step_index: 2, state: "ACTIVE", tool_name: "run_command" });
-  await until(() => ui.terminal.writes.some((s) => s.includes("AGY: Running command…")), "tool after text rendered");
+  await until(() => ui.terminal.writes.some((s) => s.includes("Running command…")), "tool after text rendered");
   await drain();
   child.step({ step_type: "tool", step_index: 2, state: "DONE" });
   await drain();
   child.step({ step_type: "subagent", step_index: 3, state: "ACTIVE", subagent_info: { subagents: [{ role: "Research" }] } });
-  await until(() => ui.terminal.writes.some((s) => s.includes("AGY: Research subagent…")), "subagent rendered");
+  await until(() => ui.terminal.writes.some((s) => s.includes("Research subagent…")), "subagent rendered");
   await drain();
   child.step({ step_type: "subagent", step_index: 3, state: "DONE" });
   await drain();
@@ -51,13 +59,15 @@ test("real AgentSession / ExtensionRunner / registered provider / TUI frames", a
   await reply;
   await until(() => ui.status() === undefined, "terminal cleanup");
   assert(events.includes("turn_start") && events.includes("turn_end"));
+  assert(!ui.workingWrites.some(value => /agy|agy-pool/i.test(value ?? "")));
+  assert.deepEqual(ui.statusWrites, [["agy-pool", undefined]], "progress never writes a footer status");
   assert(!events.some((x) => /^(tool_execution|toolcall_|thinking_)/.test(x)));
   assert.equal(h.session.state.messages.at(-1).content[0].text, "First. Last.");
 
   // Real second Pi turn reuses the process, without another init event.
   const again = h.session.prompt("Continue");
   await until(() => child.turns === 2, "reused process received second prompt");
-  assert.equal(ui.status(), "AGY: Working…");
+  assert.equal(ui.status(), undefined);
   await drain();
   child.step({ step_type: "agent_response", text_delta: "Again." });
   await drain();
@@ -84,18 +94,18 @@ test("separate real session bindings and overlapping request tokens cannot steal
   a.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "view_file" });
   await drain();
   b.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "run_command" });
-  assert.equal(ua.status(), "AGY: Reading file…");
-  assert.equal(ub.status(), "AGY: Running command…");
+  assert.equal(ua.status(), "Reading file…");
+  assert.equal(ub.status(), "Running command…");
 
   const newer = b.provider.streamSimple(b.model, {messages:[...context.messages,{role:"assistant",provider:"agy-pool",api:"agy-pool-api",content:[]},...context.messages]}, {sessionId:b.session.sessionId});
   assert.equal(b.children.length, 1, "overlap queues on the existing child");
-  assert.equal(ub.status(), "AGY: Working…");
+  assert.equal(ub.status(), undefined);
   await drain();
   b.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "write_file" });
   await drain();
   b.children[0].result();
   await rb.result();
-  assert.equal(ub.status(), "AGY: Working…", "old request settlement cannot clear newer status");
+  assert.equal(ub.status(), undefined, "old request settlement cannot clear newer status");
   await until(() => b.children[0].turns === 2, "queued request written");
   await drain();
   b.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "code_search" });
@@ -108,7 +118,7 @@ test("separate real session bindings and overlapping request tokens cannot steal
   a.children[0].result();
   await ra.result();
   assert.equal(ua.status(), undefined, "shutdown tokens remain invalid");
-  assert.equal(ub.status(), "AGY: Searching code…");
+  assert.equal(ub.status(), "Searching…");
   await drain();
   b.children[0].result();
   await newer.result();
@@ -150,7 +160,7 @@ test("switch/reload invalidation rejects late telemetry even after rebind to the
     await drain();
     child.result();
     await old.result();
-    assert.equal(ui.status(), "AGY: Reading file…");
+    assert.equal(ui.status(), "Reading file…");
     await drain();
     next.result();
     await fresh.result();
@@ -177,7 +187,7 @@ test("queued request abort restores active progress; active abort rejects shared
   queued.abort();
   assert.equal((await fresh.result()).stopReason, "aborted");
   assert.equal(first.killed, false);
-  assert.equal(ui.status(), "AGY: Reading file…", "surviving active status restored");
+  assert.equal(ui.status(), "Reading file…", "surviving active status restored");
 
   const pending = h.provider.streamSimple(h.model, context, { sessionId: h.session.sessionId });
   active.abort();
@@ -200,7 +210,7 @@ test("abort clears status while the real payload hook is still pending", async (
     sessionId: h.session.sessionId, signal: controller.signal,
     onPayload: (payload: unknown) => h.session.extensionRunner.emitBeforeProviderRequest(payload),
   });
-  assert.equal(ui.status(), "AGY: Working…");
+  assert.equal(ui.status(), undefined);
   controller.abort();
   assert.equal(ui.status(), undefined);
   release();
@@ -267,3 +277,26 @@ test("unbound helper request belongs to its runner cleanup", async t => {
   b.children[0].result();
   assert.equal((await normal.result()).stopReason, "stop");
 });
+
+for (const terminal of ["success", "error", "exit", "abort"]) {
+  test(`real working indicator restores default on ${terminal}`, async t => {
+    const h = await createHarness();
+    const ui = await attachTui(h);
+    t.after(() => ui.close());
+    const controller = new AbortController();
+    const request = h.provider.streamSimple(h.model, { messages: [] }, { sessionId: h.session.sessionId, signal: controller.signal });
+    const child = h.children[0];
+    child.send({ event: "init", conversation_id: "terminal-ui" });
+    await until(() => child.turns === 1, "submitted");
+    child.step({ step_type: "tool", state: "ACTIVE", tool_name: "view_file" });
+    assert.equal(ui.status(), "Reading file…");
+    if (terminal === "abort") controller.abort();
+    else if (terminal === "exit") child.emit("exit", 1, null);
+    else child.send({ event: "result", status: terminal === "error" ? "ERROR" : "SUCCESS" });
+    await request.result();
+    assert.equal(ui.status(), undefined);
+    assert.equal(ui.workingWrites.at(-1), undefined);
+    assert.deepEqual(ui.statusWrites, [["agy-pool", undefined]]);
+    assert.equal(ui.footerStatus().get("ponytail"), "ponytail: full");
+  });
+}

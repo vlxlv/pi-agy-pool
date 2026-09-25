@@ -625,8 +625,8 @@ describe("Compaction Support", () => {
 
     for await (const _ of stream) {}
 
-    assert.ok(progressMessages.includes("AGY: Working…"));
-    assert.ok(progressMessages.includes("AGY: Reading file…"));
+    assert.ok(!progressMessages.some(message => /AGY|Working/.test(message)));
+    assert.ok(progressMessages.includes("Reading file…"));
   });
 
   // 20. tool telemetry still never becomes Pi toolcall
