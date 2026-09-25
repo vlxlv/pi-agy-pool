@@ -4,7 +4,6 @@ import {
   type AgyEvent,
   type AgyInitEvent,
   type AgyResultEvent,
-  type AgyStepUpdateEvent,
   AgyEventDecoder,
 } from "./agy-events.ts";
 
@@ -19,6 +18,15 @@ export interface AgyProcessOptions {
   env?: NodeJS.ProcessEnv;
   spawnFn?: typeof spawn;
   maxRecordSize?: number;
+}
+
+interface Turn {
+  prompt: string | Promise<string>;
+  onEvent: (event: AgyEvent) => void;
+  resolve: (result: AgyResultEvent) => void;
+  reject: (error: Error) => void;
+  cleanup: () => void;
+  started: boolean;
 }
 
 /**
@@ -40,10 +48,16 @@ export class AgyProcess extends EventEmitter {
   sessionId?: string;
 
   private _isAlive = true;
-  private _isBusy = false;
   private _isAborted = false;
   private stderrTail = "";
-  private turnQueue: Promise<unknown> = Promise.resolve();
+  private readonly turns: Turn[] = [];
+  private failure?: Error;
+  private exited = false;
+  private termination?: Promise<void>;
+  private terminationResolve!: () => void;
+  private escalation?: NodeJS.Timeout;
+  readonly closed: Promise<void> = new Promise(resolve => { this.terminationResolve = resolve; });
+  init?: AgyInitEvent;
 
   readonly ready: Promise<AgyInitEvent>;
   private readyResolve!: (value: AgyInitEvent) => void;
@@ -63,6 +77,9 @@ export class AgyProcess extends EventEmitter {
       this.readyResolve = resolve;
       this.readyReject = reject;
     });
+
+    // Readiness can fail before any caller attaches (for example during onPayload).
+    void this.ready.catch(() => {});
 
     const bin = options.bin || process.env.AGY_POOL_BIN || "agy-pool";
     const args: string[] = [
@@ -104,7 +121,7 @@ export class AgyProcess extends EventEmitter {
   }
 
   isBusy(): boolean {
-    return this._isBusy;
+    return this.turns.length > 0;
   }
 
   isAborted(): boolean {
@@ -112,300 +129,179 @@ export class AgyProcess extends EventEmitter {
   }
 
   private setupChildHandlers(): void {
-    if (this.child.stdout) {
-      this.child.stdout.on("data", (chunk: Buffer) => {
-        try {
-          const events = this.decoder.feed(chunk);
-          for (const event of events) {
-            this.handleEvent(event);
-          }
-        } catch (err) {
-          const error = err instanceof Error ? err : new Error(String(err));
-          this.emit("error", error);
-          this.abort().catch(() => {});
-        }
-      });
-
-      this.child.stdout.on("end", () => {
-        try {
-          const events = this.decoder.flush();
-          for (const event of events) {
-            this.handleEvent(event);
-          }
-        } catch (err) {
-          const error = err instanceof Error ? err : new Error(String(err));
-          this.emit("error", error);
-        }
-      });
-    }
-
-    if (this.child.stderr) {
-      this.child.stderr.on("data", (chunk: Buffer) => {
-        // Retain the last 4KB of stderr for diagnostic error reporting
-        this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-4096);
-      });
-    }
-
-    this.child.on("error", (err: Error) => {
-      this._isAlive = false;
-      this._isBusy = false;
-      this.readyReject(err);
-      this.emit("error", err);
-    });
-
-    this.child.on("exit", (code: number | null, signal: string | null) => {
-      this._isAlive = false;
-      this._isBusy = false;
-      if (!this._isAborted && code !== 0 && code !== null) {
-        const detail = this.stderrTail.trim();
-        const err = new Error(
-          `AGY process exited with code ${code}${detail ? `: ${detail}` : ""}`,
-        );
-        this.readyReject(err);
-        this.emit("error", err);
+    const fatal = (error: Error) => {
+      this.invalidate(error);
+      void this.terminate("SIGINT");
+    };
+    this.child.stdin?.on("error", fatal);
+    this.child.stdout?.on("error", fatal);
+    this.child.stderr?.on("error", fatal);
+    this.child.stdout?.on("data", (chunk: Buffer) => {
+      if (!this.isAlive()) return;
+      try {
+        for (const event of this.decoder.feed(chunk)) this.handleEvent(event);
+      } catch (error) {
+        fatal(error instanceof Error ? error : new Error(String(error)));
       }
+    });
+    this.child.stdout?.on("end", () => {
+      if (!this.isAlive()) return;
+      try {
+        for (const event of this.decoder.flush()) this.handleEvent(event);
+      } catch (error) {
+        fatal(error instanceof Error ? error : new Error(String(error)));
+      }
+      fatal(new Error("AGY stdout ended before process completion"));
+    });
+    this.child.stdout?.once("close", () => {
+      if (this.isAlive()) fatal(new Error("AGY stdout closed"));
+    });
+    this.child.stderr?.on("data", (chunk: Buffer) => {
+      this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-4096);
+    });
+    this.child.on("error", (error: Error) => {
+      this.invalidate(error);
+      // Failed spawn has no PID and will never emit exit; close is also observed.
+      if (this.child.pid === undefined) this.didExit();
+      else void this.terminate("SIGINT");
+    });
+    this.child.once("exit", (code: number | null, signal: string | null) => {
+      const detail = this.stderrTail.trim();
+      this.didExit();
+      this.invalidate(new Error(`AGY process exited with code ${code}${signal ? ` (${signal})` : ""}${detail ? `: ${detail}` : ""}`));
       this.emit("exit", code, signal);
     });
+    this.child.once("close", () => {
+      this.didExit();
+      this.invalidate(new Error("AGY process closed"));
+    });
+  }
+
+  private didExit(): void {
+    this.exited = true;
+    if (this.escalation) clearTimeout(this.escalation);
+    this.terminationResolve();
+  }
+
+  private invalidate(error: Error): void {
+    if (this.failure) return;
+    this.failure = error;
+    this._isAlive = false;
+    this.readyReject(error);
+    for (const turn of this.turns.splice(0)) {
+      turn.cleanup();
+      turn.reject(error);
+    }
+    this.emit("invalidated");
+    this.emit("error", error);
   }
 
   private handleEvent(event: AgyEvent): void {
-    if (event.event === "init") {
-      const initEvent = event as AgyInitEvent;
-      if (initEvent.conversation_id) {
-        this.conversationId = initEvent.conversation_id;
-      }
-      if (initEvent.session_id) {
-        this.sessionId = initEvent.session_id;
-      }
-      this.readyResolve(initEvent);
-      this.emit("init", initEvent);
-    } else if (event.event === "step_update") {
-      this.emit("step_update", event as AgyStepUpdateEvent);
-    } else if (event.event === "result") {
-      this._isBusy = false;
-      this.emit("result", event as AgyResultEvent);
+    if (!this.isAlive()) return;
+    if (event.event === "init" && !this.init) {
+      this.init = event as AgyInitEvent;
+      this.conversationId = this.init.conversation_id || this.conversationId;
+      this.sessionId = this.init.session_id;
+      this.readyResolve(this.init);
+      this.emit("init", this.init);
     }
+    // Capture the head once: callbacks/results may enqueue more work.
+    const turn = this.turns[0];
+    if (turn?.started) {
+      try {
+        turn.onEvent(event);
+      } catch (error) {
+        this.invalidate(error instanceof Error ? error : new Error(String(error)));
+        void this.terminate("SIGINT");
+        return;
+      }
+      if (event.event === "result" && this.turns[0] === turn) {
+        const result = event as AgyResultEvent;
+        this.turns.shift();
+        turn.cleanup();
+        if ((result.status || result.result?.status) === "ERROR") {
+          turn.reject(new Error(result.error || result.result?.error || "AGY generation failed"));
+          this.invalidate(new Error("AGY generation failed"));
+          void this.terminate("SIGINT");
+        } else turn.resolve(result);
+        // Do not hand this native result (or remaining events in its chunk) to B.
+        queueMicrotask(() => this.startHead());
+      }
+    }
+    if (event.event === "step_update" || event.event === "result") this.emit(event.event, event);
     this.emit("event", event);
   }
 
-  /**
-   * Executes a turn by writing user message JSON to stdin and streaming events.
-   * Serializes turns belonging to the same AGY process in order.
-   */
-  runTurn(
-    prompt: string,
-    onEvent: (event: AgyEvent) => void,
-    signal?: AbortSignal,
-  ): Promise<AgyResultEvent> {
-    if (signal?.aborted) {
-      return Promise.reject(new Error("Request was aborted"));
-    }
-
-    if (!this.isAlive()) {
-      return Promise.reject(new Error("AGY process is not alive"));
-    }
-
-    if (!this._isBusy) {
-      const turnPromise = this.executeTurn(prompt, onEvent, signal);
-      this.turnQueue = turnPromise.then(
-        () => {},
-        () => {},
-      );
-      return turnPromise;
-    }
-
-    let abortQueued: (() => void) | undefined;
-    const abortPromise = new Promise<never>((_, reject) => {
-      if (signal) {
-        abortQueued = () => {
-          this.abort().catch(() => {});
-          reject(new Error("Request was aborted"));
-        };
-        signal.addEventListener("abort", abortQueued, { once: true });
-      }
-    });
-
-    const run = async (): Promise<AgyResultEvent> => {
-      if (abortQueued && signal) {
-        signal.removeEventListener("abort", abortQueued);
-      }
-      if (signal?.aborted) {
-        await this.abort().catch(() => {});
-        throw new Error("Request was aborted");
-      }
-      if (!this.isAlive()) {
-        throw new Error("AGY process is not alive");
-      }
-      return this.executeTurn(prompt, onEvent, signal);
-    };
-
-    const queued = this.turnQueue.then(run, run);
-    this.turnQueue = queued.then(
-      () => {},
-      () => {},
-    );
-
-    return Promise.race([queued, abortPromise]);
-  }
-
-  private executeTurn(
-    prompt: string,
-    onEvent: (event: AgyEvent) => void,
-    signal?: AbortSignal,
-  ): Promise<AgyResultEvent> {
-
-    const stdin = this.child.stdin;
-    if (!stdin || stdin.destroyed) {
-      return Promise.reject(new Error("AGY process stdin is not writable"));
-    }
-
-    this._isBusy = true;
-
-    return new Promise<AgyResultEvent>((resolve, reject) => {
-      let settled = false;
-
-      const cleanup = () => {
-        settled = true;
-        this.off("event", handleEvent);
-        this.off("error", handleError);
-        this.off("exit", handleExit);
-        signal?.removeEventListener("abort", handleAbort);
-      };
-
-      const handleEvent = (event: AgyEvent) => {
-        onEvent(event);
-        if (event.event === "result") {
-          const resEvent = event as AgyResultEvent;
-          const status = resEvent.status || resEvent.result?.status;
-          const error = resEvent.error || resEvent.result?.error;
-          cleanup();
-          if (status === "ERROR") {
-            reject(new Error(error || "AGY generation failed"));
-          } else {
-            resolve(resEvent);
-          }
-        }
-      };
-
-      const handleError = (err: Error) => {
-        if (!settled) {
-          cleanup();
-          reject(err);
-        }
-      };
-
-      const handleExit = (code: number | null) => {
-        if (!settled) {
-          cleanup();
-          if (this._isAborted) {
-            reject(new Error("Request was aborted"));
-          } else {
-            const detail = this.stderrTail.trim();
-            reject(
-              new Error(
-                `AGY process exited prematurely with code ${code}${detail ? `: ${detail}` : ""}`,
-              ),
-            );
-          }
-        }
-      };
-
-      const handleAbort = async () => {
-        if (!settled) {
-          cleanup();
-          try {
-            await this.abort();
-          } catch {
-            // Ignore abort error
-          }
+  /** The array is the FIFO authority; only its started head can write/settle. */
+  runTurn(prompt: string | Promise<string>, onEvent: (event: AgyEvent) => void, signal?: AbortSignal): Promise<AgyResultEvent> {
+    // A queued payload may reject before reaching the head.
+    if (typeof prompt !== "string") void prompt.catch(() => {});
+    if (signal?.aborted) return Promise.reject(new Error("Request was aborted"));
+    if (!this.isAlive()) return Promise.reject(this.failure || new Error("AGY process is not alive"));
+    return new Promise((resolve, reject) => {
+      const turn: Turn = { prompt, onEvent, resolve, reject, cleanup: () => signal?.removeEventListener("abort", cancel), started: false };
+      const cancel = () => {
+        if (this.turns[0] === turn && turn.started) {
+          void this.abort();
+        } else {
+          const index = this.turns.indexOf(turn);
+          if (index < 0) return;
+          this.turns.splice(index, 1);
+          turn.cleanup();
           reject(new Error("Request was aborted"));
         }
       };
-
-      if (signal?.aborted) {
-        handleAbort();
-        return;
-      }
-
-      signal?.addEventListener("abort", handleAbort, { once: true });
-      this.on("event", handleEvent);
-      this.on("error", handleError);
-      this.on("exit", handleExit);
-
-      this.ready
-        .then(() => {
-          if (settled) return;
-          const turnMessage = JSON.stringify({
-            event: "user",
-            message: { content: prompt },
-          });
-          stdin.write(turnMessage + "\n", (err) => {
-            if (err && !settled) {
-              cleanup();
-              reject(err);
-            }
-          });
-        })
-        .catch((err) => {
-          if (!settled) {
-            cleanup();
-            reject(err);
-          }
-        });
+      signal?.addEventListener("abort", cancel, { once: true });
+      this.turns.push(turn);
+      this.startHead();
     });
   }
 
-  /**
-   * Immediately sends SIGINT to the process and waits for exit.
-   * A cancelled process is invalidated and must never be reused.
-   */
-  async abort(): Promise<void> {
-    if (this._isAborted || !this._isAlive) {
-      return;
-    }
-    this._isAborted = true;
-    this._isAlive = false;
-    this._isBusy = false;
-
-    return new Promise<void>((resolve) => {
-      let timeoutId: NodeJS.Timeout | undefined;
-
-      const onExit = () => {
-        if (timeoutId) clearTimeout(timeoutId);
-        resolve();
-      };
-
-      this.child.once("exit", onExit);
-
-      try {
-        this.child.kill("SIGINT");
-      } catch {
-        onExit();
-        return;
-      }
-
-      timeoutId = setTimeout(() => {
-        try {
-          this.child.kill("SIGKILL");
-        } catch {
-          // ignore
+  private startHead(): void {
+    const turn = this.turns[0];
+    if (!turn || turn.started || !this.isAlive()) return;
+    turn.started = true;
+    void Promise.all([this.ready, turn.prompt]).then(([, prompt]) => {
+      if (this.turns[0] !== turn || !this.isAlive()) return;
+      const stdin = this.child.stdin;
+      if (!stdin || stdin.destroyed || !stdin.writable) throw new Error("AGY process stdin is not writable");
+      stdin.write(JSON.stringify({ event: "user", message: { content: prompt } }) + "\n", error => {
+        if (error) {
+          this.invalidate(error);
+          void this.terminate("SIGINT");
         }
-        resolve();
+      });
+    }).catch(error => {
+      if (this.turns[0] !== turn) return;
+      this.invalidate(error instanceof Error ? error : new Error(String(error)));
+      void this.terminate("SIGINT");
+    });
+  }
+
+  private terminate(signal: NodeJS.Signals): Promise<void> {
+    if (this.termination) return this.termination;
+    this.termination = this.closed;
+    if (!this.exited) {
+      // Install escalation before kill: test children and fast exits can be synchronous.
+      this.escalation = setTimeout(() => {
+        if (!this.exited) {
+          try { this.child.kill("SIGKILL"); } catch { /* Still wait for definitive exit/close. */ }
+        }
       }, 3000);
-      timeoutId.unref?.();
-    });
+      this.escalation.unref();
+      try { this.child.kill(signal); } catch { /* close/exit remains authoritative. */ }
+    }
+    return this.termination;
   }
 
-  /**
-   * Terminate the process unconditionally (e.g. on shutdown).
-   */
-  kill(): void {
-    this._isAlive = false;
+  abort(): Promise<void> {
     this._isAborted = true;
-    try {
-      this.child.kill("SIGTERM");
-    } catch {
-      // ignore
-    }
+    this.invalidate(new Error("Request was aborted"));
+    return this.terminate("SIGINT");
+  }
+
+  kill(): Promise<void> {
+    this.invalidate(new Error("AGY process was retired"));
+    return this.terminate("SIGTERM");
   }
 }

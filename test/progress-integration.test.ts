@@ -69,18 +69,21 @@ test("separate real session bindings and overlapping request tokens cannot steal
   const rb = start(b);
   a.children[0].send({ event: "init", conversation_id: "isolation-a" });
   b.children[0].send({ event: "init", conversation_id: "isolation-b" });
+  await until(() => a.children[0].turns === 1 && b.children[0].turns === 1, "both requests written");
   a.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "view_file" });
   b.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "run_command" });
   assert.equal(ua.status(), "AGY: Reading file…");
   assert.equal(ub.status(), "AGY: Running command…");
 
   const newer = start(b);
-  b.children[1].send({ event: "init", conversation_id: "isolation-b-newer" });
-  b.children[1].step({ step_type: "tool", state: "ACTIVE", tool_name: "code_search" });
+  assert.equal(b.children.length, 1, "overlap queues on the existing child");
+  assert.equal(ub.status(), "AGY: Working…");
   b.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "write_file" });
   b.children[0].result();
   await rb.result();
-  assert.equal(ub.status(), "AGY: Searching code…", "old request settlement cannot clear newer status");
+  assert.equal(ub.status(), "AGY: Working…", "old request settlement cannot clear newer status");
+  await until(() => b.children[0].turns === 2, "queued request written");
+  b.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "code_search" });
 
   await a.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
   assert.equal(ua.status(), undefined);
@@ -89,16 +92,16 @@ test("separate real session bindings and overlapping request tokens cannot steal
   await ra.result();
   assert.equal(ua.status(), undefined, "shutdown tokens remain invalid");
   assert.equal(ub.status(), "AGY: Searching code…");
-  b.children[1].result();
+  b.children[0].result();
   await newer.result();
   assert.equal(ub.status(), undefined);
 
   // A request with the wrong session ID cannot use B's bound UI.
   const mismatch = start(b, a.session.sessionId);
-  b.children[2].send({ event: "init", conversation_id: "mismatch" });
-  b.children[2].step({ step_type: "tool", state: "ACTIVE", tool_name: "view_file" });
+  b.children[1].send({ event: "init", conversation_id: "mismatch" });
+  b.children[1].step({ step_type: "tool", state: "ACTIVE", tool_name: "view_file" });
   assert.equal(ub.status(), undefined);
-  b.children[2].result();
+  b.children[1].result();
   await mismatch.result();
 });
 
@@ -130,31 +133,31 @@ test("switch/reload invalidation rejects late telemetry even after rebind to the
   await delay(20); // let the final real renderer frame drain before teardown
 });
 
-test("request abort/error cleanup preserves another request and restores its status", async (t) => {
+test("queued request abort restores active progress; active abort rejects shared queue", async (t) => {
   const h = await createHarness();
   const ui = await attachTui(h);
   t.after(() => ui.close());
   const context = { messages: [{ role: "user", content: "offline", timestamp: 1 }] };
-  const controller = new AbortController();
-  const old = h.provider.streamSimple(h.model, context, { sessionId: h.session.sessionId, signal: controller.signal });
+  const active = new AbortController();
+  const old = h.provider.streamSimple(h.model, context, { sessionId: h.session.sessionId, signal: active.signal });
   const first = h.children[0];
   first.send({ event: "init", conversation_id: "abort-old" });
+  await until(() => first.turns === 1, "active request written");
   first.step({ step_type: "tool", state: "ACTIVE", tool_name: "view_file" });
-  const fresh = h.provider.streamSimple(h.model, context, { sessionId: h.session.sessionId });
-  const second = h.children[1];
-  second.send({ event: "init", conversation_id: "abort-new" });
-  second.step({ step_type: "tool", state: "ACTIVE", tool_name: "run_command" });
-  controller.abort();
-  assert.equal((await old.result()).stopReason, "aborted");
-  assert.equal(ui.status(), "AGY: Running command…");
+  const queued = new AbortController();
+  const fresh = h.provider.streamSimple(h.model, context, { sessionId: h.session.sessionId, signal: queued.signal });
+  assert.equal(h.children.length, 1);
+  queued.abort();
+  assert.equal((await fresh.result()).stopReason, "aborted");
+  assert.equal(first.killed, false);
+  assert.equal(ui.status(), "AGY: Reading file…", "surviving active status restored");
 
-  const failing = h.provider.streamSimple(h.model, context, { sessionId: h.session.sessionId });
-  h.children[2].send({ event: "init", conversation_id: "error-new" });
-  h.children[2].send({ event: "result", status: "ERROR", error: "test failure" });
-  assert.equal((await failing.result()).stopReason, "error");
-  assert.equal(ui.status(), "AGY: Running command…", "surviving request restored");
-  second.result();
-  await fresh.result();
+  const pending = h.provider.streamSimple(h.model, context, { sessionId: h.session.sessionId });
+  active.abort();
+  assert.equal((await old.result()).stopReason, "aborted");
+  assert.notEqual((await pending.result()).stopReason, "stop");
+  assert.equal(first.killed, true);
+  assert.equal(first.turns, 1);
   assert.equal(ui.status(), undefined);
 });
 
@@ -175,6 +178,29 @@ test("abort clears status while the real payload hook is still pending", async (
   assert.equal(ui.status(), undefined);
   release();
   assert.equal((await request.result()).stopReason, "aborted");
+});
+
+test("real ExtensionRunner shutdown waits for owned child termination", async (t) => {
+  const h = await createHarness();
+  const ui = await attachTui(h);
+  t.after(() => ui.close());
+  const stream = h.provider.streamSimple(h.model, { messages: [] }, { sessionId: h.session.sessionId });
+  const child = h.children[0];
+  const kill = child.kill.bind(child);
+  t.after(() => { child.kill = kill; });
+  // Control external child exit only; Pi dispatch and lifecycle awaiting are real.
+  child.kill = () => { child.killed = true; return true; };
+  let settled = false;
+  const shutdown = h.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }).then(() => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(child.killed, true);
+  assert.equal(settled, false);
+  assert.equal(ui.status(), undefined);
+  assert.equal((await stream.result()).stopReason, "error");
+  child.emit("exit", null, "SIGTERM");
+  await shutdown;
+  assert.equal(settled, true);
+  child.kill = kill;
 });
 
 test("real runner invalidation prevents a captured callback from reaching a replacement UI", async (t) => {

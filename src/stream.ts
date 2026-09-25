@@ -11,11 +11,40 @@ import {
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 import { type AgyEffort, AgyProcess } from "./agy-process.ts";
-import type { AgyEvent, AgyInitEvent, AgyStepUpdatePayload } from "./agy-events.ts";
+import type { AgyEvent, AgyStepUpdatePayload } from "./agy-events.ts";
 import type { spawn } from "node:child_process";
 
 // ponytail: in-memory conversation map per process, external persistence/daemon handled by agy-pool-go
 export const activeProcesses = new Map<string, AgyProcess>();
+// Includes starting/retiring children, until their definitive termination.
+const ownedProcesses = new Map<AgyProcess, string>();
+// Only overlapping acquisition/turns: this is not a conversation provenance cache.
+const acquisitions = new Map<string, AgyProcess>();
+
+function removeProcessReferences(proc: AgyProcess): void {
+  for (const [id, owner] of activeProcesses) if (owner === proc) activeProcesses.delete(id);
+  for (const [sid, owner] of acquisitions) if (owner === proc) acquisitions.delete(sid);
+}
+
+function trackProcess(proc: AgyProcess, sid: string): void {
+  ownedProcesses.set(proc, sid);
+  acquisitions.set(sid, proc);
+  proc.once("invalidated", () => removeProcessReferences(proc));
+  void proc.closed.then(() => {
+    removeProcessReferences(proc);
+    ownedProcesses.delete(proc);
+  });
+  proc.once("init", () => {
+    const id = proc.conversationId;
+    if (!id || !proc.isAlive() || !ownedProcesses.has(proc)) return;
+    activeProcesses.set(id, proc);
+    validPostCompactionConversations.add(id);
+    const state = getSessionState(sid);
+    state.activeConversationId = id;
+    state.needsBootstrap = false;
+    conversationToSession.set(id, sid);
+  });
+}
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:\n\n<summary>\n`;
 export const COMPACTION_SUMMARY_SUFFIX = `\n</summary>`;
@@ -59,41 +88,32 @@ export function getSessionState(sessionId: string): SessionCompactionState {
  * Safely retire the active conversation and process for a session.
  * Marks the session as requiring a fresh AGY bootstrap.
  */
-export function retireSessionConversation(sessionId: string): void {
+export function retireSessionConversation(sessionId: string): Promise<void> {
   const state = getSessionState(sessionId);
   state.needsBootstrap = true;
-
+  const processes = new Set<AgyProcess>();
+  for (const [proc, sid] of ownedProcesses) if (sid === sessionId) processes.add(proc);
   if (state.activeConversationId) {
-    const oldConvId = state.activeConversationId;
-    state.retiredConversationIds.add(oldConvId);
-    retiredConversationIds.add(oldConvId);
-    validPostCompactionConversations.delete(oldConvId);
-
-    const proc = activeProcesses.get(oldConvId);
-    if (proc) {
-      if (!proc.isBusy()) {
-        proc.kill();
-        activeProcesses.delete(oldConvId);
-      } else {
-        // Safe retirement: child is executing a turn; terminate once settled
-        proc.once("result", () => {
-          proc.kill();
-          activeProcesses.delete(oldConvId);
-        });
-      }
-    } else {
-      activeProcesses.delete(oldConvId);
-    }
-
+    const id = state.activeConversationId;
+    state.retiredConversationIds.add(id);
+    retiredConversationIds.add(id);
+    validPostCompactionConversations.delete(id);
+    const proc = activeProcesses.get(id);
+    if (proc) processes.add(proc);
     state.activeConversationId = undefined;
   }
+  return Promise.all([...processes].map(proc => {
+    const closed = proc.kill();
+    removeProcessReferences(proc);
+    return closed;
+  })).then(() => {});
 }
 
 /**
  * Authoritative compaction notification for a session.
  */
-export function markSessionCompacted(sessionId: string): void {
-  retireSessionConversation(sessionId);
+export function markSessionCompacted(sessionId: string): Promise<void> {
+  return retireSessionConversation(sessionId);
 }
 
 let shutdownHooksRegistered = false;
@@ -101,16 +121,16 @@ let shutdownHooksRegistered = false;
 /**
  * Clear all active processes and session tracking. Used for test teardown and shutdown.
  */
-export function resetActiveProcesses(): void {
-  for (const proc of activeProcesses.values()) {
-    proc.kill();
-  }
+export function resetActiveProcesses(): Promise<void> {
+  const pending = [...new Set([...ownedProcesses.keys(), ...activeProcesses.values()])].map(proc => proc.kill());
+  acquisitions.clear();
   activeProcesses.clear();
   sessionStates.clear();
   conversationToSession.clear();
   retiredConversationIds.clear();
   validPostCompactionConversations.clear();
   currentSessionId = undefined;
+  return Promise.all(pending).then(() => {});
 }
 
 export function handleSignal(
@@ -707,7 +727,7 @@ export function streamSimple(
 
   (async () => {
     let proc: AgyProcess | undefined;
-    let boundConversationId: string | undefined;
+    let createdProcess = false;
 
     try {
       if (options?.signal?.aborted) {
@@ -738,29 +758,43 @@ export function streamSimple(
         : findConversationId(context, { sessionId: activeSid });
 
       let isResumed = false;
+      let replacementClosed: Promise<void> | undefined;
       const effort = resolveEffort(model.id, options);
 
-      if (conversationId) {
+      const reserved = acquisitions.get(activeSid);
+      if (reserved?.isAlive() && (!conversationId || reserved.conversationId === conversationId)) {
+        if (reserved.modelId === model.id && reserved.effort === effort) {
+          proc = reserved;
+          isResumed = true;
+        } else {
+          void reserved.kill();
+          removeProcessReferences(reserved);
+        }
+      }
+      if (!proc && conversationId) {
         const existing = activeProcesses.get(conversationId);
         if (existing && existing.isAlive()) {
           if (existing.modelId === model.id && existing.effort === effort) {
             proc = existing;
-            boundConversationId = conversationId;
             output.responseId = conversationId;
             (output as unknown as Record<string, unknown>).conversationId = conversationId;
             isResumed = true;
           } else {
             // Model or effort changed: do not silently reuse mismatched process configuration.
             // Terminate old process; conversation continuity is preserved via --conversation <id>.
-            existing.kill();
-            activeProcesses.delete(conversationId);
+            void existing.kill();
+            removeProcessReferences(existing);
           }
         } else if (existing) {
-          activeProcesses.delete(conversationId);
+          removeProcessReferences(existing);
         }
       }
 
       if (!proc) {
+        // Include earlier retiring generations too (A -> B -> C replacement).
+        replacementClosed = Promise.all([...ownedProcesses]
+          .filter(([owner, sid]) => sid === activeSid && !owner.isAlive())
+          .map(([owner]) => owner.closed)).then(() => {});
         proc = new AgyProcess({
           modelId: model.id,
           effort,
@@ -768,61 +802,42 @@ export function streamSimple(
           bin: options?.bin,
           spawnFn: options?.spawnFn,
         });
+        createdProcess = true;
+        trackProcess(proc, activeSid);
         isResumed = Boolean(conversationId);
       }
+      acquisitions.set(activeSid, proc);
 
-      let prompt = buildTurnPrompt(context, isResumed);
-
-      if (options?.onPayload) {
-        const turnPayload = {
-          event: "user",
-          message: { content: prompt },
-        };
-        const replacement = await options.onPayload(turnPayload, model);
-        if (
-          replacement &&
-          typeof replacement === "object" &&
-          "message" in replacement &&
-          (replacement as { message?: { content?: string } }).message?.content
-        ) {
-          prompt = (replacement as { message: { content: string } }).message.content;
+      // Reserve the FIFO slot before an asynchronous payload hook can yield.
+      const prompt = Promise.resolve().then(async () => {
+        const original = buildTurnPrompt(context, isResumed);
+        const replacement = await options?.onPayload?.({ event: "user", message: { content: original } }, model);
+        if (replacement && typeof replacement === "object" && "message" in replacement) {
+          return (replacement as { message?: { content?: string } }).message?.content || original;
         }
-      }
+        return original;
+      });
 
       let startedEmitted = false;
 
+      let initialized = false;
+      const bindInit = () => {
+        const init = proc?.init;
+        if (initialized || !init) return;
+        initialized = true;
+        output.responseId = init.conversation_id;
+        (output as unknown as Record<string, unknown>).conversationId = init.conversation_id;
+        if (createdProcess && !startedEmitted) {
+          startedEmitted = true;
+          stream.push({ type: "start", partial: output });
+        }
+        if (createdProcess && options?.onResponse) void options.onResponse({ status: 200, headers: {} }, model);
+      };
+
       const handleEvent = (event: AgyEvent) => {
         if (event.event === "init") {
-          const init = event as AgyInitEvent;
-          boundConversationId = init.conversation_id;
-          output.responseId = init.conversation_id;
-          (output as unknown as Record<string, unknown>).conversationId = init.conversation_id;
-          if (init.conversation_id && proc) {
-            const alreadyBound = activeProcesses.get(init.conversation_id) === proc;
-            activeProcesses.set(init.conversation_id, proc);
-            validPostCompactionConversations.add(init.conversation_id);
-            if (activeSid) {
-              const sState = getSessionState(activeSid);
-              sState.activeConversationId = init.conversation_id;
-              sState.needsBootstrap = false;
-              conversationToSession.set(init.conversation_id, activeSid);
-            }
-            if (!alreadyBound) {
-              proc.once("exit", () => {
-                if (boundConversationId) {
-                  activeProcesses.delete(boundConversationId);
-                }
-              });
-            }
-          }
-          if (!startedEmitted) {
-            startedEmitted = true;
-            stream.push({ type: "start", partial: output });
-          }
+          bindInit();
           progressAdapter.update("AGY: Working…");
-          if (options?.onResponse) {
-            void options.onResponse({ status: 200, headers: {} }, model);
-          }
         } else if (event.event === "step_update") {
           const update = (event as { step_update?: AgyStepUpdatePayload }).step_update;
           if (!update) return;
@@ -884,8 +899,15 @@ export function streamSimple(
         }
       };
 
+      // Early init is retained by the process; no event replay is required.
+      // A replacement may initialize, but cannot execute while its predecessor lives.
+      const preparedPrompt = Promise.all([proc.ready, prompt, replacementClosed]).then(([, prepared]) => {
+        bindInit();
+        return prepared;
+      });
+
       // Execute the turn
-      const result = await proc.runTurn(prompt, handleEvent, options?.signal);
+      const result = await proc.runTurn(preparedPrompt, handleEvent, options?.signal);
       progressAdapter.finish();
 
       // Fallback: If no streaming deltas were received, populate from terminal result response
@@ -962,12 +984,6 @@ export function streamSimple(
       stream.end();
     } catch (error) {
       progressAdapter.finish();
-      if (boundConversationId) {
-        activeProcesses.delete(boundConversationId);
-      }
-      if (proc) {
-        proc.abort().catch(() => {});
-      }
 
       const isAborted =
         Boolean(options?.signal?.aborted) ||
@@ -984,6 +1000,7 @@ export function streamSimple(
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();
     } finally {
+      if (proc && !proc.isBusy() && acquisitions.get(activeSid) === proc) acquisitions.delete(activeSid);
       progressAdapter.finish();
     }
   })();

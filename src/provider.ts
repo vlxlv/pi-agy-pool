@@ -95,35 +95,35 @@ export function registerAgyPoolProvider(
 
     pi.on("session_compact", (_event: SessionCompactEvent, ctx: ExtensionContext) => {
       const sid = ctx?.sessionManager?.getSessionId?.() || "default";
-      markSessionCompacted(sid);
+      return markSessionCompacted(sid);
     });
 
     pi.on("session_before_switch", (_event, ctx: ExtensionContext) => {
       const sid = ctx?.sessionManager?.getSessionId?.() || "default";
-      retireSessionConversation(sid);
+      const closed = retireSessionConversation(sid);
       invalidateProgress(sid);
+      return closed;
     });
 
     pi.on("session_before_fork", (_event, ctx: ExtensionContext) => {
       const sid = ctx?.sessionManager?.getSessionId?.() || "default";
-      retireSessionConversation(sid);
+      const closed = retireSessionConversation(sid);
       invalidateProgress(sid);
+      return closed;
     });
 
     pi.on("session_tree", (_event, ctx: ExtensionContext) => {
       const sid = ctx?.sessionManager?.getSessionId?.() || "default";
-      retireSessionConversation(sid);
+      const closed = retireSessionConversation(sid);
       invalidateProgress(sid);
+      return closed;
     });
 
     pi.on("session_shutdown", (_event, ctx?: ExtensionContext) => {
       const sid = ctx?.sessionManager?.getSessionId?.();
-      if (sid) {
-        retireSessionConversation(sid);
-      } else {
-        resetActiveProcesses();
-      }
+      const closed = sid ? retireSessionConversation(sid) : resetActiveProcesses();
       invalidateProgress(sid);
+      return closed;
     });
   }
 
