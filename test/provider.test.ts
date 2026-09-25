@@ -134,7 +134,7 @@ describe("provider.ts: Pi real provider integration", () => {
     }
   });
 
-  it("cleans up active child processes on Pi session_shutdown lifecycle event", () => {
+  it("unbound Pi session_shutdown preserves unrelated process ownership", () => {
     resetActiveProcesses();
 
     const registeredHandlers: Record<string, Function> = {};
@@ -165,8 +165,9 @@ describe("provider.ts: Pi real provider integration", () => {
     // Trigger session_shutdown event
     registeredHandlers["session_shutdown"]({ type: "session_shutdown", reason: "quit" });
 
-    assert.strictEqual(killed, true, "Process must be killed on session_shutdown");
-    assert.strictEqual(activeProcesses.size, 0, "activeProcesses must be cleared");
+    assert.strictEqual(killed, false, "An unbound shutdown must not kill another session");
+    assert.strictEqual(activeProcesses.size, 1, "Unowned diagnostic entries are not routing authority");
+    activeProcesses.delete("conv-lifecycle-test");
   });
 
   it("real Pi composeModelProvider correctly propagates reasoning and thinkingLevelMap", async () => {

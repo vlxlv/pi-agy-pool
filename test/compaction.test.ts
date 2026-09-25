@@ -134,6 +134,7 @@ describe("Compaction Support", () => {
         { role: "user", content: "Turn 1", timestamp: 100 },
         {
           role: "assistant",
+          provider: "agy-pool", api: "agy-pool-api",
           content: [{ type: "text", text: "Hello" }],
           responseId: "conv-normal-1",
           timestamp: 200,
@@ -178,17 +179,15 @@ describe("Compaction Support", () => {
   });
 
   // 3. old pre-compaction process is retired
-  it("3. old pre-compaction process is retired", () => {
+  it("3. old pre-compaction process is retired", async () => {
     const mock = createMockChildProcess();
-    const proc = new (activeProcesses.get("non-existent")?.constructor as any || (class {
-      isBusy() { return false; }
-      kill() { mock.child.kill("SIGTERM"); }
-    }))();
-    activeProcesses.set("conv-old", proc as any);
-
-    getSessionState("session-test").activeConversationId = "conv-old";
-    markSessionCompacted("session-test");
-
+    const stream = streamSimple(dummyModel, { messages: [] } as unknown as TranscriptContext,
+      { sessionId: "session-test", spawnFn: (() => mock.child) as any });
+    mock.stdout.write(JSON.stringify({ event: "init", conversation_id: "conv-old" }) + "\n");
+    await drain();
+    mock.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
+    await stream.result();
+    await markSessionCompacted("session-test");
     assert.strictEqual(activeProcesses.has("conv-old"), false);
     assert.strictEqual(mock.signalsReceived.includes("SIGTERM"), true);
     assert.strictEqual(getSessionState("session-test").activeConversationId, undefined);
@@ -237,6 +236,7 @@ describe("Compaction Support", () => {
         { role: "user", content: "Kept prompt", timestamp: 150 },
         {
           role: "assistant",
+          provider: "agy-pool", api: "agy-pool-api",
           content: [{ type: "text", text: "Kept response" }],
           responseId: "conv-1",
           timestamp: 160,
@@ -288,6 +288,7 @@ describe("Compaction Support", () => {
         { role: "user", content: "Kept user message", timestamp: 150 },
         {
           role: "assistant",
+          provider: "agy-pool", api: "agy-pool-api",
           content: [{ type: "text", text: "Kept assistant response" }],
           responseId: "conv-old-1",
           timestamp: 160,
@@ -382,6 +383,7 @@ describe("Compaction Support", () => {
         { role: "user", content: "Turn 1 post-compact", timestamp: 250 },
         {
           role: "assistant",
+          provider: "agy-pool", api: "agy-pool-api",
           content: [{ type: "text", text: "Resp 1" }],
           responseId: "conv-new-222",
           timestamp: 260,
@@ -462,7 +464,8 @@ describe("Compaction Support", () => {
       {
         messages: [
           { role: "user", content: "B1", timestamp: 10 },
-          { role: "assistant", content: [{ type: "text", text: "B1 reply" }], responseId: "conv-b", timestamp: 20 } as AssistantMessage,
+          { role: "assistant",
+          provider: "agy-pool", api: "agy-pool-api", content: [{ type: "text", text: "B1 reply" }], responseId: "conv-b", timestamp: 20 } as AssistantMessage,
           { role: "user", content: "B2", timestamp: 30 },
         ],
       } as any,
@@ -491,6 +494,7 @@ describe("Compaction Support", () => {
         },
         {
           role: "assistant",
+          provider: "agy-pool", api: "agy-pool-api",
           content: [{ type: "text", text: "Pre-compaction response" }],
           responseId: "stale-pre-compact-conv-id",
           timestamp: 400,
@@ -699,6 +703,7 @@ describe("Compaction Support", () => {
         { role: "user", content: "Hi", timestamp: 1 },
         {
           role: "assistant",
+          provider: "agy-pool", api: "agy-pool-api",
           content: [{ type: "text", text: "Hello" }],
           responseId: "conv-normal-standard",
           timestamp: 2,

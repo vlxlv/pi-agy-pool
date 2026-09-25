@@ -1,3 +1,4 @@
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -7,9 +8,9 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   markSessionCompacted,
-  resetActiveProcesses,
+  releaseProviderProcesses,
+  ownershipReceipt,
   retireSessionConversation,
-  setCurrentSessionId,
   streamSimple,
 } from "./stream.ts";
 
@@ -55,6 +56,9 @@ export function registerAgyPoolProvider(
     requests: Map<symbol, string | undefined>;
   };
   let binding: Binding | undefined;
+  let sessionContext: ExtensionContext | undefined;
+  const sessionOwner = Symbol("agy-session-owner");
+  const requests = new Set<AbortController>();
   const invalidateProgress = (sessionId?: string) => {
     if (!binding || (sessionId && binding.sessionId !== sessionId)) return;
     const old = binding;
@@ -77,6 +81,7 @@ export function registerAgyPoolProvider(
   // Use Pi session lifecycle hooks for child process cleanup, progress reporting, and compaction
   if (typeof pi.on === "function") {
     pi.on("session_start", (event, ctx) => {
+      sessionContext = ctx;
       invalidateProgress();
       bindProgress(event, ctx);
     });
@@ -84,44 +89,39 @@ export function registerAgyPoolProvider(
     // remain invalid; only requests started after this boundary can use the UI.
     pi.on("turn_start", (_event, ctx: ExtensionContext) => {
       bindProgress(_event, ctx);
-      const sid = ctx?.sessionManager?.getSessionId?.() || "default";
-      setCurrentSessionId(sid);
+      sessionContext = ctx;
     });
 
     pi.on("before_provider_request", (_event, ctx: ExtensionContext) => {
-      const sid = ctx?.sessionManager?.getSessionId?.() || "default";
-      setCurrentSessionId(sid);
+      sessionContext = ctx;
     });
 
     pi.on("session_compact", (_event: SessionCompactEvent, ctx: ExtensionContext) => {
-      const sid = ctx?.sessionManager?.getSessionId?.() || "default";
-      return markSessionCompacted(sid);
+      const sid = ctx.sessionManager.getSessionId();
+      return markSessionCompacted(sid, sessionOwner);
     });
 
     pi.on("session_before_switch", (_event, ctx: ExtensionContext) => {
-      const sid = ctx?.sessionManager?.getSessionId?.() || "default";
-      const closed = retireSessionConversation(sid);
+      const sid = ctx.sessionManager.getSessionId();
       invalidateProgress(sid);
-      return closed;
     });
 
     pi.on("session_before_fork", (_event, ctx: ExtensionContext) => {
-      const sid = ctx?.sessionManager?.getSessionId?.() || "default";
-      const closed = retireSessionConversation(sid);
-      invalidateProgress(sid);
-      return closed;
+      invalidateProgress(ctx.sessionManager.getSessionId());
     });
 
     pi.on("session_tree", (_event, ctx: ExtensionContext) => {
-      const sid = ctx?.sessionManager?.getSessionId?.() || "default";
-      const closed = retireSessionConversation(sid);
+      const sid = ctx.sessionManager.getSessionId();
+      const closed = retireSessionConversation(sid, sessionOwner);
       invalidateProgress(sid);
       return closed;
     });
 
     pi.on("session_shutdown", (_event, ctx?: ExtensionContext) => {
       const sid = ctx?.sessionManager?.getSessionId?.();
-      const closed = sid ? retireSessionConversation(sid) : resetActiveProcesses();
+      for (const request of requests) request.abort();
+      const closed = releaseProviderProcesses(sessionOwner);
+      sessionContext = undefined;
       invalidateProgress(sid);
       return closed;
     });
@@ -135,6 +135,37 @@ export function registerAgyPoolProvider(
     baseUrl,
     models,
     streamSimple(model, context, streamOptions) {
+      // A runner can authorize historical resume only for its actual session.
+      // Compare the projection receipt to the last receipt across the entire tree:
+      // a historical branch endpoint is not the mutable native conversation tip.
+      let bound = false;
+      let resume;
+      let branchCheckpoint: string | null | undefined;
+      try {
+        const manager = sessionContext?.sessionManager;
+        if (streamOptions?.sessionId && manager?.getSessionId() === streamOptions.sessionId) {
+          bound = true;
+          const relevant = (m: { role: string }) => m.role === "assistant" &&
+            (m as AssistantMessage).provider === model.provider && (m as AssistantMessage).api === model.api;
+          const current = [...context.messages].reverse().find(m => m.role === "assistant") as AssistantMessage | undefined;
+          const latest = manager.getEntries().filter(e => e.type === "message" && relevant(e.message)).at(-1);
+          const receipt = current && relevant(current) ? ownershipReceipt(current) : undefined;
+          branchCheckpoint = receipt?.checkpoint ?? null;
+          if (receipt?.sessionId === streamOptions.sessionId && latest?.type === "message" &&
+              latest.message.role === "assistant" && latest.message.stopReason !== "error" &&
+              latest.message.stopReason !== "aborted" && ownershipReceipt(latest.message)?.checkpoint === receipt.checkpoint) {
+            resume = receipt;
+          }
+        }
+      } catch {
+        // A disposed runner cannot authorize either live reuse or historical resume.
+        bound = false;
+        resume = undefined;
+        branchCheckpoint = undefined;
+      }
+      const controller = new AbortController();
+      requests.add(controller);
+      const signal = streamOptions?.signal ? AbortSignal.any([streamOptions.signal, controller.signal]) : controller.signal;
       const owner = binding;
       const token = Symbol("agy-request");
       const ownsUI = owner?.live && streamOptions?.sessionId === owner.sessionId && !streamOptions?.signal?.aborted;
@@ -161,6 +192,7 @@ export function registerAgyPoolProvider(
         }
       };
       const finish = () => {
+        requests.delete(controller);
         streamOptions?.signal?.removeEventListener("abort", finish);
         if (ownsUI && owner.live && owner.requests.delete(token)) render();
       };
@@ -168,6 +200,11 @@ export function registerAgyPoolProvider(
       try {
         const result = streamSimple(model, context, {
           ...streamOptions,
+          resume,
+          branchCheckpoint,
+          owner: sessionOwner,
+          ephemeral: !bound,
+          signal,
           onProgress(message) {
             if (!ownsUI || !owner.live || !owner.requests.has(token)) return;
             owner.requests.set(token, message);

@@ -97,7 +97,7 @@ describe("stream.ts: streamSimple", () => {
       ],
     } as unknown as TranscriptContext;
 
-    const stream = streamSimple(dummyModel, context, { spawnFn });
+    const stream = streamSimple(dummyModel, context, { spawnFn, sessionId: "stream-test" });
 
     // Simulate AGY events
     mock.stdout.write('{"event":"init","conversation_id":"conv-test-1"}\n');
@@ -160,7 +160,7 @@ describe("stream.ts: streamSimple", () => {
       ],
     } as unknown as TranscriptContext;
 
-    const stream1 = streamSimple(dummyModel, context1, { spawnFn });
+    const stream1 = streamSimple(dummyModel, context1, { spawnFn, sessionId: "stream-test" });
     mock.stdout.write('{"event":"init","conversation_id":"c-reuse"}\n');
     await drain();
     mock.stdout.write(
@@ -182,7 +182,7 @@ describe("stream.ts: streamSimple", () => {
       ],
     } as unknown as TranscriptContext;
 
-    const stream2 = streamSimple(dummyModel, context2, { spawnFn });
+    const stream2 = streamSimple(dummyModel, context2, { spawnFn, sessionId: "stream-test" });
     // Process is reused, NO new spawn!
     assert.strictEqual(spawnCount, 1);
 
@@ -217,7 +217,7 @@ describe("stream.ts: streamSimple", () => {
       messages: [{ role: "user", content: "Turn 1", timestamp: Date.now() }],
     } as unknown as TranscriptContext;
 
-    const stream1 = streamSimple(dummyModel, context1, { spawnFn });
+    const stream1 = streamSimple(dummyModel, context1, { spawnFn, sessionId: "stream-test" });
     mock1.stdout.write('{"event":"init","conversation_id":"c-resumed"}\n');
     await drain();
     mock1.stdout.write('{"event":"step_update","step_update":{"text_delta":"R1"}}\n');
@@ -236,7 +236,7 @@ describe("stream.ts: streamSimple", () => {
       ],
     } as unknown as TranscriptContext;
 
-    const stream2 = streamSimple(dummyModel, context2, { spawnFn });
+    const stream2 = streamSimple(dummyModel, context2, { spawnFn, sessionId: "stream-test" });
     assert.strictEqual(spawnCount, 2);
     assert.ok(lastSpawnArgs.includes("--conversation"));
     assert.ok(lastSpawnArgs.includes("c-resumed"));
@@ -297,7 +297,7 @@ describe("stream.ts: streamSimple", () => {
       messages: [{ role: "user", content: "Error test", timestamp: Date.now() }],
     } as unknown as TranscriptContext;
 
-    const stream = streamSimple(dummyModel, context, { spawnFn });
+    const stream = streamSimple(dummyModel, context, { spawnFn, sessionId: "stream-test" });
     mock.stdout.write('{"event":"init","conversation_id":"c-err"}\n');
     await drain();
     mock.stdout.write('{"event":"result","status":"ERROR","error":"Upstream quota exceeded"}\n');
@@ -338,6 +338,7 @@ describe("stream.ts: streamSimple", () => {
         { role: "user", content: "Hi", timestamp: 1 },
         {
           role: "assistant",
+          provider: "agy-pool", api: "agy-pool-api",
           content: [{ type: "text", text: "Hello" }],
           responseId: "conv-xyz-789",
           timestamp: 2,
@@ -420,7 +421,7 @@ describe("stream.ts: streamSimple", () => {
     const contextA = {
       messages: [{ role: "user", content: "Session A query", timestamp: 100 }],
     } as unknown as TranscriptContext;
-    const streamA = streamSimple(dummyModel, contextA, { spawnFn });
+    const streamA = streamSimple(dummyModel, contextA, { spawnFn, sessionId: "session-A" });
     mockA.stdout.write('{"event":"init","conversation_id":"conv-session-A"}\n');
     await drain();
     mockA.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -431,7 +432,7 @@ describe("stream.ts: streamSimple", () => {
     const contextB = {
       messages: [{ role: "user", content: "Session B query", timestamp: 200 }],
     } as unknown as TranscriptContext;
-    const streamB = streamSimple(dummyModel, contextB, { spawnFn });
+    const streamB = streamSimple(dummyModel, contextB, { spawnFn, sessionId: "session-B" });
     mockB.stdout.write('{"event":"init","conversation_id":"conv-session-B"}\n');
     await drain();
     mockB.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -450,7 +451,7 @@ describe("stream.ts: streamSimple", () => {
     const context = {
       messages: [{ role: "user", content: "Active query", timestamp: 1 }],
     } as unknown as TranscriptContext;
-    const stream = streamSimple(dummyModel, context, { spawnFn });
+    const stream = streamSimple(dummyModel, context, { spawnFn, sessionId: "stream-test" });
     mock.stdout.write('{"event":"init","conversation_id":"c-cleanup"}\n');
     await drain();
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -473,7 +474,7 @@ describe("stream.ts: streamSimple", () => {
     const context = {
       messages: [{ role: "user", content: "Fail once", timestamp: 1 }],
     } as unknown as TranscriptContext;
-    const stream = streamSimple(dummyModel, context, { spawnFn });
+    const stream = streamSimple(dummyModel, context, { spawnFn, sessionId: "stream-test" });
     mock.stdout.write('{"event":"init","conversation_id":"c-no-retry"}\n');
     await drain();
     mock.stdout.write('{"event":"result","status":"ERROR","error":"rate limit"}\n');
@@ -521,7 +522,7 @@ describe("stream.ts: streamSimple", () => {
     const initContext = {
       messages: [{ role: "user", content: "Init", timestamp: 1 }],
     } as unknown as TranscriptContext;
-    const initStream = streamSimple(dummyModel, initContext, { spawnFn });
+    const initStream = streamSimple(dummyModel, initContext, { spawnFn, sessionId: "stream-test" });
     mock.stdout.write('{"event":"init","conversation_id":"c-concurrent"}\n');
     await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"text_delta":"Init reply"}}\n');
@@ -537,6 +538,7 @@ describe("stream.ts: streamSimple", () => {
         { role: "user", content: "Init", timestamp: 1 },
         {
           role: "assistant",
+          provider: "agy-pool", api: "agy-pool-api",
           content: [{ type: "text", text: "Init reply" }],
           responseId: "c-concurrent",
           timestamp: 2,
@@ -550,6 +552,7 @@ describe("stream.ts: streamSimple", () => {
         { role: "user", content: "Init", timestamp: 1 },
         {
           role: "assistant",
+          provider: "agy-pool", api: "agy-pool-api",
           content: [{ type: "text", text: "Init reply" }],
           responseId: "c-concurrent",
           timestamp: 2,
@@ -557,6 +560,7 @@ describe("stream.ts: streamSimple", () => {
         { role: "user", content: "Turn 1 question", timestamp: 3 },
         {
           role: "assistant",
+          provider: "agy-pool", api: "agy-pool-api",
           content: [{ type: "text", text: "Turn 1 reply" }],
           responseId: "c-concurrent",
           timestamp: 4,
@@ -594,8 +598,8 @@ describe("stream.ts: streamSimple", () => {
     });
 
     // Start stream 1 and stream 2 simultaneously
-    const stream1 = streamSimple(dummyModel, turn1Context, { spawnFn });
-    const stream2 = streamSimple(dummyModel, turn2Context, { spawnFn });
+    const stream1 = streamSimple(dummyModel, turn1Context, { spawnFn, sessionId: "stream-test" });
+    const stream2 = streamSimple(dummyModel, turn2Context, { spawnFn, sessionId: "stream-test" });
 
     // Ensure activeProcesses was NOT deleted or overwritten
     assert.strictEqual(activeProcesses.has("c-concurrent"), true);
@@ -632,7 +636,7 @@ describe("stream.ts: streamSimple", () => {
     const context = {
       messages: [{ role: "user", content: "Sig test", timestamp: 1 }],
     } as unknown as TranscriptContext;
-    streamSimple(dummyModel, context, { spawnFn });
+    streamSimple(dummyModel, context, { spawnFn, sessionId: "stream-test" });
     mock.stdout.write('{"event":"init","conversation_id":"c-sigint"}\n');
 
     assert.strictEqual(activeProcesses.has("c-sigint"), true);
@@ -673,7 +677,7 @@ describe("stream.ts: streamSimple", () => {
     const context = {
       messages: [{ role: "user", content: "Usage test", timestamp: 1 }],
     } as unknown as TranscriptContext;
-    const stream = streamSimple(dummyModel, context, { spawnFn });
+    const stream = streamSimple(dummyModel, context, { spawnFn, sessionId: "stream-test" });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-usage-fallback"}\n');
     // step_update has NO usage
@@ -714,7 +718,7 @@ describe("stream.ts: streamSimple", () => {
     const context1 = {
       messages: [{ role: "user", content: "Turn 1", timestamp: 1 }],
     } as unknown as TranscriptContext;
-    const stream1 = streamSimple(dummyModel, context1, { spawnFn });
+    const stream1 = streamSimple(dummyModel, context1, { spawnFn, sessionId: "stream-test" });
     mock1.stdout.write('{"event":"init","conversation_id":"c-switch-model"}\n');
     await drain();
     mock1.stdout.write('{"event":"step_update","step_update":{"text_delta":"Reply 1"}}\n');
@@ -738,7 +742,7 @@ describe("stream.ts: streamSimple", () => {
       ],
     } as unknown as TranscriptContext;
 
-    const stream2 = streamSimple(model2, context2, { spawnFn });
+    const stream2 = streamSimple(model2, context2, { spawnFn, sessionId: "stream-test" });
 
     // Old process must be killed with SIGTERM
     assert.ok(mock1.signalsReceived.includes("SIGTERM"), "Mismatched model process must be killed");
@@ -774,7 +778,7 @@ describe("stream.ts: streamSimple", () => {
     const context1 = {
       messages: [{ role: "user", content: "Turn 1", timestamp: 1 }],
     } as unknown as TranscriptContext;
-    const stream1 = streamSimple(dummyModel, context1, { spawnFn, reasoning: "low" });
+    const stream1 = streamSimple(dummyModel, context1, { spawnFn, sessionId: "stream-test", reasoning: "low" });
     mock1.stdout.write('{"event":"init","conversation_id":"c-switch-effort"}\n');
     await drain();
     mock1.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -792,7 +796,7 @@ describe("stream.ts: streamSimple", () => {
         { role: "user", content: "Turn 2 with high effort", timestamp: 2 },
       ],
     } as unknown as TranscriptContext;
-    const stream2 = streamSimple(dummyModel, context2, { spawnFn, reasoning: "high" });
+    const stream2 = streamSimple(dummyModel, context2, { spawnFn, sessionId: "stream-test", reasoning: "high" });
 
     // Old process must be killed with SIGTERM
     assert.ok(mock1.signalsReceived.includes("SIGTERM"), "Mismatched effort process must be killed");
@@ -815,7 +819,7 @@ describe("stream.ts: streamSimple", () => {
     const context = {
       messages: [{ role: "user", content: "Sig test", timestamp: 1 }],
     } as unknown as TranscriptContext;
-    streamSimple(dummyModel, context, { spawnFn });
+    streamSimple(dummyModel, context, { spawnFn, sessionId: "stream-test" });
     mock.stdout.write('{"event":"init","conversation_id":"c-sig-clean"}\n');
     assert.strictEqual(activeProcesses.has("c-sig-clean"), true);
 

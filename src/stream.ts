@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { API_IDENTIFIER, DEFAULT_PROVIDER_NAME } from "./models.ts";
 import {
   type Api,
   type AssistantMessage,
@@ -14,69 +16,68 @@ import { type AgyEffort, AgyProcess } from "./agy-process.ts";
 import type { AgyEvent, AgyStepUpdatePayload } from "./agy-events.ts";
 import type { spawn } from "node:child_process";
 
-// ponytail: in-memory conversation map per process, external persistence/daemon handled by agy-pool-go
+// Diagnostic conversation index only. Session ownership below is the routing authority.
 export const activeProcesses = new Map<string, AgyProcess>();
-// Includes starting/retiring children, until their definitive termination.
-const ownedProcesses = new Map<AgyProcess, string>();
-// Only overlapping acquisition/turns: this is not a conversation provenance cache.
-const acquisitions = new Map<string, AgyProcess>();
+// Includes starting/retiring children until definitive exit, with explicit owners.
+const ownedProcesses = new Map<AgyProcess, { state: SessionOwnership; owner?: symbol }>();
 
 function removeProcessReferences(proc: AgyProcess): void {
   for (const [id, owner] of activeProcesses) if (owner === proc) activeProcesses.delete(id);
-  for (const [sid, owner] of acquisitions) if (owner === proc) acquisitions.delete(sid);
 }
 
-function trackProcess(proc: AgyProcess, sid: string): void {
-  ownedProcesses.set(proc, sid);
-  acquisitions.set(sid, proc);
-  proc.once("invalidated", () => removeProcessReferences(proc));
+function trackProcess(proc: AgyProcess, state: SessionOwnership): void {
+  ownedProcesses.set(proc, { state, owner: state.owner });
+  state.process = proc;
+  proc.once("invalidated", () => {
+    removeProcessReferences(proc);
+    if (state.process === proc) {
+      state.process = undefined;
+      if (state.pending > 0) state.needsBootstrap = true;
+    }
+  });
   void proc.closed.then(() => {
     removeProcessReferences(proc);
     ownedProcesses.delete(proc);
   });
   proc.once("init", () => {
     const id = proc.conversationId;
-    if (!id || !proc.isAlive() || !ownedProcesses.has(proc)) return;
+    if (!id || !proc.isAlive() || state.process !== proc) return;
     activeProcesses.set(id, proc);
     validPostCompactionConversations.add(id);
-    const state = getSessionState(sid);
     state.activeConversationId = id;
     state.needsBootstrap = false;
-    conversationToSession.set(id, sid);
   });
 }
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:\n\n<summary>\n`;
 export const COMPACTION_SUMMARY_SUFFIX = `\n</summary>`;
 
-export interface SessionCompactionState {
+export interface SessionOwnership {
   sessionId: string;
   needsBootstrap: boolean;
   activeConversationId?: string;
   retiredConversationIds: Set<string>;
+  process?: AgyProcess;
+  owner?: symbol;
+  // In-flight callers only determine whether process death invalidates the checkpoint.
+  // Scheduling remains exclusively AgyProcess.runTurn()'s FIFO.
+  pending: number;
+  checkpoint?: string;
+  provider?: string;
+  api?: string;
 }
 
-export const sessionStates = new Map<string, SessionCompactionState>();
-export const conversationToSession = new Map<string, string>();
+export const sessionStates = new Map<string, SessionOwnership>();
 export const retiredConversationIds = new Set<string>();
 export const validPostCompactionConversations = new Set<string>();
 
-let currentSessionId: string | undefined;
-
-export function setCurrentSessionId(sessionId?: string): void {
-  currentSessionId = sessionId;
-}
-
-export function getCurrentSessionId(): string | undefined {
-  return currentSessionId;
-}
-
-export function getSessionState(sessionId: string): SessionCompactionState {
+export function getSessionState(sessionId: string): SessionOwnership {
   let state = sessionStates.get(sessionId);
   if (!state) {
     state = {
       sessionId,
       needsBootstrap: false,
+      pending: 0,
       retiredConversationIds: new Set(),
     };
     sessionStates.set(sessionId, state);
@@ -88,18 +89,19 @@ export function getSessionState(sessionId: string): SessionCompactionState {
  * Safely retire the active conversation and process for a session.
  * Marks the session as requiring a fresh AGY bootstrap.
  */
-export function retireSessionConversation(sessionId: string): Promise<void> {
+export function retireSessionConversation(sessionId: string, owner?: symbol): Promise<void> {
   const state = getSessionState(sessionId);
+  if (owner && state.owner && state.owner !== owner) return Promise.resolve();
   state.needsBootstrap = true;
   const processes = new Set<AgyProcess>();
-  for (const [proc, sid] of ownedProcesses) if (sid === sessionId) processes.add(proc);
+  for (const [proc, owner] of ownedProcesses) if (owner.state === state) processes.add(proc);
+  state.process = undefined;
+  state.checkpoint = undefined;
   if (state.activeConversationId) {
     const id = state.activeConversationId;
     state.retiredConversationIds.add(id);
     retiredConversationIds.add(id);
     validPostCompactionConversations.delete(id);
-    const proc = activeProcesses.get(id);
-    if (proc) processes.add(proc);
     state.activeConversationId = undefined;
   }
   return Promise.all([...processes].map(proc => {
@@ -109,11 +111,35 @@ export function retireSessionConversation(sessionId: string): Promise<void> {
   })).then(() => {});
 }
 
+/** Release only this session's children; persisted receipts remain resume candidates. */
+export function releaseSessionProcesses(sessionId: string, owner?: symbol): Promise<void> {
+  const state = sessionStates.get(sessionId);
+  if (!state || (owner && state.owner !== owner)) return Promise.resolve();
+  state.process = undefined;
+  return Promise.all([...ownedProcesses].filter(([, registration]) => registration.state === state && (!owner || registration.owner === owner))
+    .map(([proc]) => proc.kill())).then(() => {});
+}
+
+/** Runner disposal also owns short-lived requests whose routing ID differs (e.g. compaction). */
+export function releaseProviderProcesses(owner: symbol): Promise<void> {
+  return Promise.all([...ownedProcesses].filter(([, registration]) => registration.owner === owner)
+    .map(([proc, registration]) => {
+      if (registration.state.process === proc) registration.state.process = undefined;
+      return proc.kill();
+    })).then(() => {});
+}
+
+export interface OwnershipReceipt { sessionId: string; checkpoint: string }
+export function ownershipReceipt(message: AssistantMessage): OwnershipReceipt | undefined {
+  const receipt = (message as AssistantMessage & { agyPoolOwner?: OwnershipReceipt }).agyPoolOwner;
+  return receipt && typeof receipt.sessionId === "string" && typeof receipt.checkpoint === "string" ? receipt : undefined;
+}
+
 /**
  * Authoritative compaction notification for a session.
  */
-export function markSessionCompacted(sessionId: string): Promise<void> {
-  return retireSessionConversation(sessionId);
+export function markSessionCompacted(sessionId: string, owner?: symbol): Promise<void> {
+  return retireSessionConversation(sessionId, owner);
 }
 
 let shutdownHooksRegistered = false;
@@ -123,13 +149,10 @@ let shutdownHooksRegistered = false;
  */
 export function resetActiveProcesses(): Promise<void> {
   const pending = [...new Set([...ownedProcesses.keys(), ...activeProcesses.values()])].map(proc => proc.kill());
-  acquisitions.clear();
   activeProcesses.clear();
   sessionStates.clear();
-  conversationToSession.clear();
   retiredConversationIds.clear();
   validPostCompactionConversations.clear();
-  currentSessionId = undefined;
   return Promise.all(pending).then(() => {});
 }
 
@@ -288,6 +311,8 @@ export function extractAuthoritativeSystemPrompt(
 export interface FindConversationOptions {
   sessionId?: string;
   isPostCompactionBootstrap?: boolean;
+  provider?: string;
+  api?: string;
 }
 
 /**
@@ -306,7 +331,7 @@ export function findConversationId(
     return undefined;
   }
 
-  const sid = options?.sessionId ?? currentSessionId;
+  const sid = options?.sessionId;
   if (sid) {
     const sState = sessionStates.get(sid);
     if (sState?.needsBootstrap) {
@@ -320,6 +345,8 @@ export function findConversationId(
     const msg = context.messages[i];
     if (msg.role === "assistant") {
       const assistantMsg = msg as AssistantMessage;
+      if (assistantMsg.provider !== (options?.provider ?? DEFAULT_PROVIDER_NAME) ||
+          assistantMsg.api !== (options?.api ?? API_IDENTIFIER)) return undefined;
       const convId =
         assistantMsg.responseId ||
         (assistantMsg as unknown as Record<string, unknown>).conversationId;
@@ -365,17 +392,6 @@ export function findConversationId(
   return undefined;
 }
 
-/**
- * Scan transcript backwards for an assistant message with an AGY conversation ID,
- * then resolve the associated Pi session ID if known.
- */
-export function findSessionId(context: TranscriptContext): string | undefined {
-  const convId = findConversationId(context);
-  if (convId) {
-    return conversationToSession.get(convId);
-  }
-  return undefined;
-}
 
 /**
  * Construct turn prompt for the official AGY stream-json input.
@@ -683,6 +699,11 @@ export interface ExtendedStreamOptions extends SimpleStreamOptions {
   spawnFn?: typeof spawn;
   bin?: string;
   onProgress?: AgyProgressCallback;
+  /** Verified against the real Pi session tree by the registered provider. */
+  resume?: OwnershipReceipt;
+  owner?: symbol;
+  ephemeral?: boolean;
+  branchCheckpoint?: string | null;
   sessionId?: string;
 }
 
@@ -703,8 +724,10 @@ export function streamSimple(
   registerShutdownHooksOnce();
   const stream = createAssistantMessageEventStream();
 
-  const activeSid =
-    options?.sessionId ?? findSessionId(context) ?? currentSessionId ?? "default";
+  const previous = options?.sessionId ? sessionStates.get(options.sessionId) : undefined;
+  const ephemeral = !options?.sessionId || options.ephemeral ||
+    Boolean(previous?.process && previous.owner !== options?.owner);
+  const activeSid = ephemeral ? `request:${randomUUID()}` : options!.sessionId!;
   const progressAdapter = new AgyProgressAdapter(options?.onProgress);
 
   const output: AssistantMessage = {
@@ -728,6 +751,7 @@ export function streamSimple(
   (async () => {
     let proc: AgyProcess | undefined;
     let createdProcess = false;
+    let requestState: SessionOwnership | undefined;
 
     try {
       if (options?.signal?.aborted) {
@@ -742,7 +766,7 @@ export function streamSimple(
 
       if (!isBootstrapTurn && compaction.hasCompaction) {
         const existingConvId = findConversationId(context, {
-          sessionId: activeSid,
+          sessionId: activeSid, provider: model.provider, api: model.api,
         });
         if (!existingConvId) {
           isBootstrapTurn = true;
@@ -753,60 +777,54 @@ export function streamSimple(
         retireSessionConversation(activeSid);
       }
 
-      const conversationId = isBootstrapTurn
-        ? undefined
-        : findConversationId(context, { sessionId: activeSid });
-
+      const state = getSessionState(activeSid);
+      requestState = state;
+      state.pending++;
+      const candidate = findConversationId(context, { sessionId: activeSid, provider: model.provider, api: model.api });
+      const lastAssistant = [...context.messages].reverse().find(m => m.role === "assistant") as AssistantMessage | undefined;
+      const historicalReceipt = lastAssistant && ownershipReceipt(lastAssistant);
+      const canResume = Boolean(options?.sessionId && candidate && historicalReceipt?.sessionId === activeSid &&
+        options?.resume?.sessionId === activeSid && options.resume.checkpoint === historicalReceipt.checkpoint);
+      if ((state.process || state.checkpoint) && !state.process?.isBusy() && (
+        (options?.branchCheckpoint !== undefined && state.checkpoint !== options.branchCheckpoint) ||
+        (state.provider !== model.provider || state.api !== model.api))) {
+        void retireSessionConversation(activeSid);
+        isBootstrapTurn = true;
+      }
+      let conversationId = isBootstrapTurn ? undefined : state.activeConversationId || (canResume ? candidate : undefined);
+      // Even a valid historical receipt cannot attach a second owner to a mutable conversation.
+      if (conversationId && [...ownedProcesses].some(([p, owner]) => owner.state !== state &&
+          p.conversationId === conversationId)) conversationId = undefined;
       let isResumed = false;
       let replacementClosed: Promise<void> | undefined;
       const effort = resolveEffort(model.id, options);
-
-      const reserved = acquisitions.get(activeSid);
-      if (reserved?.isAlive() && (!conversationId || reserved.conversationId === conversationId)) {
-        if (reserved.modelId === model.id && reserved.effort === effort) {
-          proc = reserved;
+      const existing = state.process;
+      if (existing?.isAlive()) {
+        if (existing.modelId === model.id && existing.effort === effort) {
+          proc = existing;
           isResumed = true;
+        } else if (existing.isBusy()) {
+          // Interrupted native work may already be ahead of the Pi projection.
+          void retireSessionConversation(activeSid);
+          conversationId = undefined;
         } else {
-          void reserved.kill();
-          removeProcessReferences(reserved);
+          state.process = undefined;
+          void existing.kill();
         }
       }
-      if (!proc && conversationId) {
-        const existing = activeProcesses.get(conversationId);
-        if (existing && existing.isAlive()) {
-          if (existing.modelId === model.id && existing.effort === effort) {
-            proc = existing;
-            output.responseId = conversationId;
-            (output as unknown as Record<string, unknown>).conversationId = conversationId;
-            isResumed = true;
-          } else {
-            // Model or effort changed: do not silently reuse mismatched process configuration.
-            // Terminate old process; conversation continuity is preserved via --conversation <id>.
-            void existing.kill();
-            removeProcessReferences(existing);
-          }
-        } else if (existing) {
-          removeProcessReferences(existing);
-        }
-      }
-
       if (!proc) {
-        // Include earlier retiring generations too (A -> B -> C replacement).
         replacementClosed = Promise.all([...ownedProcesses]
-          .filter(([owner, sid]) => sid === activeSid && !owner.isAlive())
+          .filter(([owner, session]) => session.state === state && !owner.isAlive())
           .map(([owner]) => owner.closed)).then(() => {});
-        proc = new AgyProcess({
-          modelId: model.id,
-          effort,
-          conversationId,
-          bin: options?.bin,
-          spawnFn: options?.spawnFn,
-        });
+        proc = new AgyProcess({ modelId: model.id, effort, conversationId,
+          bin: options?.bin, spawnFn: options?.spawnFn });
         createdProcess = true;
-        trackProcess(proc, activeSid);
+        state.owner = options?.owner;
+        state.provider = model.provider;
+        state.api = model.api;
+        trackProcess(proc, state);
         isResumed = Boolean(conversationId);
       }
-      acquisitions.set(activeSid, proc);
 
       // Reserve the FIFO slot before an asynchronous payload hook can yield.
       const prompt = Promise.resolve().then(async () => {
@@ -976,6 +994,9 @@ export function streamSimple(
         });
       }
 
+      const receipt: OwnershipReceipt = { sessionId: activeSid, checkpoint: randomUUID() };
+      if (!ephemeral) (output as AssistantMessage & { agyPoolOwner: OwnershipReceipt }).agyPoolOwner = receipt;
+      if (state.process === proc) state.checkpoint = receipt.checkpoint;
       const finalReason =
         output.stopReason === "stop" || output.stopReason === "length"
           ? output.stopReason
@@ -1000,7 +1021,11 @@ export function streamSimple(
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();
     } finally {
-      if (proc && !proc.isBusy() && acquisitions.get(activeSid) === proc) acquisitions.delete(activeSid);
+      if (requestState) requestState.pending--;
+      if (ephemeral) {
+        await releaseSessionProcesses(activeSid);
+        sessionStates.delete(activeSid);
+      }
       progressAdapter.finish();
     }
   })();

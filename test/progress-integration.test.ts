@@ -137,6 +137,8 @@ test("switch/reload invalidation rejects late telemetry even after rebind to the
     child.send({ event: "init", conversation_id: `old-${type}` });
     await h.session.extensionRunner.emit({ type, reason: "reload" });
     assert.equal(ui.status(), undefined);
+    // Successful switch/fork tears down the runner after its cancellable before hook.
+    if (type.startsWith("session_before_")) await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
     await h.session.extensionRunner.emit({ type: "session_start", reason: "reload" });
     const fresh = h.provider.streamSimple(h.model, context, { sessionId: h.session.sessionId });
     const next = h.children.at(-1)!;
@@ -221,7 +223,7 @@ test("real ExtensionRunner shutdown waits for owned child termination", async (t
   assert.equal(child.killed, true);
   assert.equal(settled, false);
   assert.equal(ui.status(), undefined);
-  assert.equal((await stream.result()).stopReason, "error");
+  assert.equal((await stream.result()).stopReason, "aborted");
   child.emit("exit", null, "SIGTERM");
   await shutdown;
   assert.equal(settled, true);
@@ -244,4 +246,24 @@ test("real runner invalidation prevents a captured callback from reaching a repl
   child.result();
   await request.result();
   assert.equal(ui.status(), before, "late events must not mutate disposed UI");
+});
+
+test("unbound helper request belongs to its runner cleanup", async t => {
+  const a = await createHarness();
+  const b = await createHarness();
+  t.after(async () => { await a.cleanup(); await b.cleanup(); });
+  await a.session.bindExtensions({ mode: "print" });
+  await b.session.bindExtensions({ mode: "print" });
+  const context = { messages: [{ role: "user", content: "offline", timestamp: 1 }] };
+  const helper = a.provider.streamSimple(a.model, context, { sessionId: "helper-id" });
+  const normal = b.provider.streamSimple(b.model, context, { sessionId: b.session.sessionId });
+  a.children[0].send({ event: "init", conversation_id: "helper" });
+  b.children[0].send({ event: "init", conversation_id: "normal" });
+  await until(() => a.children[0].turns === 1 && b.children[0].turns === 1, "both submitted");
+  await a.host.dispose();
+  assert.equal((await helper.result()).stopReason, "aborted");
+  assert.equal(a.children[0].killed, true);
+  assert.equal(b.children[0].killed, false);
+  b.children[0].result();
+  assert.equal((await normal.result()).stopReason, "stop");
 });
