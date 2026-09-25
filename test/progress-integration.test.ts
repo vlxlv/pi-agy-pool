@@ -1,3 +1,4 @@
+import { setImmediate as drain } from "node:timers/promises";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
@@ -30,15 +31,22 @@ test("real AgentSession / ExtensionRunner / registered provider / TUI frames", a
   await until(() => ui.terminal.writes.slice(before).some((s) =>
     stripVTControlCharacters(s).includes("AGY: Reading file — done; continuing…")), "completed activity rendered");
   assert.equal(ui.mode.workingMessage, undefined, "AGY must not customize the native spinner");
+  await drain();
   child.step({ step_type: "agent_response", text_delta: "First. " });
   await until(() => ui.status() === undefined, "text clears keyed status");
+  await drain();
   child.step({ step_type: "tool", step_index: 2, state: "ACTIVE", tool_name: "run_command" });
   await until(() => ui.terminal.writes.some((s) => s.includes("AGY: Running command…")), "tool after text rendered");
+  await drain();
   child.step({ step_type: "tool", step_index: 2, state: "DONE" });
+  await drain();
   child.step({ step_type: "subagent", step_index: 3, state: "ACTIVE", subagent_info: { subagents: [{ role: "Research" }] } });
   await until(() => ui.terminal.writes.some((s) => s.includes("AGY: Research subagent…")), "subagent rendered");
+  await drain();
   child.step({ step_type: "subagent", step_index: 3, state: "DONE" });
+  await drain();
   child.step({ step_type: "agent_response", text_delta: "Last." });
+  await drain();
   child.result();
   await reply;
   await until(() => ui.status() === undefined, "terminal cleanup");
@@ -50,7 +58,9 @@ test("real AgentSession / ExtensionRunner / registered provider / TUI frames", a
   const again = h.session.prompt("Continue");
   await until(() => child.turns === 2, "reused process received second prompt");
   assert.equal(ui.status(), "AGY: Working…");
+  await drain();
   child.step({ step_type: "agent_response", text_delta: "Again." });
+  await drain();
   child.result();
   await again;
   assert.equal(h.children.length, 1);
@@ -70,7 +80,9 @@ test("separate real session bindings and overlapping request tokens cannot steal
   a.children[0].send({ event: "init", conversation_id: "isolation-a" });
   b.children[0].send({ event: "init", conversation_id: "isolation-b" });
   await until(() => a.children[0].turns === 1 && b.children[0].turns === 1, "both requests written");
+  await drain();
   a.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "view_file" });
+  await drain();
   b.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "run_command" });
   assert.equal(ua.status(), "AGY: Reading file…");
   assert.equal(ub.status(), "AGY: Running command…");
@@ -78,20 +90,26 @@ test("separate real session bindings and overlapping request tokens cannot steal
   const newer = start(b);
   assert.equal(b.children.length, 1, "overlap queues on the existing child");
   assert.equal(ub.status(), "AGY: Working…");
+  await drain();
   b.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "write_file" });
+  await drain();
   b.children[0].result();
   await rb.result();
   assert.equal(ub.status(), "AGY: Working…", "old request settlement cannot clear newer status");
   await until(() => b.children[0].turns === 2, "queued request written");
+  await drain();
   b.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "code_search" });
 
   await a.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
   assert.equal(ua.status(), undefined);
+  await drain();
   a.children[0].step({ step_type: "tool", state: "ACTIVE", tool_name: "write_file" });
+  await drain();
   a.children[0].result();
   await ra.result();
   assert.equal(ua.status(), undefined, "shutdown tokens remain invalid");
   assert.equal(ub.status(), "AGY: Searching code…");
+  await drain();
   b.children[0].result();
   await newer.result();
   assert.equal(ub.status(), undefined);
@@ -99,8 +117,10 @@ test("separate real session bindings and overlapping request tokens cannot steal
   // A request with the wrong session ID cannot use B's bound UI.
   const mismatch = start(b, a.session.sessionId);
   b.children[1].send({ event: "init", conversation_id: "mismatch" });
+  await drain();
   b.children[1].step({ step_type: "tool", state: "ACTIVE", tool_name: "view_file" });
   assert.equal(ub.status(), undefined);
+  await drain();
   b.children[1].result();
   await mismatch.result();
 });
@@ -121,11 +141,15 @@ test("switch/reload invalidation rejects late telemetry even after rebind to the
     const fresh = h.provider.streamSimple(h.model, context, { sessionId: h.session.sessionId });
     const next = h.children.at(-1)!;
     next.send({ event: "init", conversation_id: `new-${type}` });
+    await drain();
     next.step({ step_type: "tool", state: "ACTIVE", tool_name: "view_file" });
+    await drain();
     child.step({ step_type: "tool", state: "ACTIVE", tool_name: "run_command" });
+    await drain();
     child.result();
     await old.result();
     assert.equal(ui.status(), "AGY: Reading file…");
+    await drain();
     next.result();
     await fresh.result();
     assert.equal(ui.status(), undefined);
@@ -143,6 +167,7 @@ test("queued request abort restores active progress; active abort rejects shared
   const first = h.children[0];
   first.send({ event: "init", conversation_id: "abort-old" });
   await until(() => first.turns === 1, "active request written");
+  await drain();
   first.step({ step_type: "tool", state: "ACTIVE", tool_name: "view_file" });
   const queued = new AbortController();
   const fresh = h.provider.streamSimple(h.model, context, { sessionId: h.session.sessionId, signal: queued.signal });
@@ -213,7 +238,9 @@ test("real runner invalidation prevents a captured callback from reaching a repl
   // A host can invalidate a runner independently of session_shutdown.
   h.session.extensionRunner.invalidate();
   const before = ui.status();
+  await drain();
   child.step({ step_type: "tool", state: "ACTIVE", tool_name: "view_file" });
+  await drain();
   child.result();
   await request.result();
   assert.equal(ui.status(), before, "late events must not mutate disposed UI");

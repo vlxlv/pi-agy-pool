@@ -270,7 +270,9 @@ test("CP1 abort during pending payload settles without releasing hook", async ()
   const stream = streamSimple(model, context, { sessionId: "pending", spawnFn: f.spawnFn, signal: controller.signal, onPayload: () => new Promise(() => {}) });
   const settled = observe(stream.result()); controller.abort(); await drain();
   assert.equal(settled.count, 1); assert.equal(settled.value?.stopReason, "aborted");
-  assert.deepEqual(f.signals, ["SIGINT"]); assert.deepEqual(f.writes, []);
+  assert.deepEqual(f.signals, []); assert.deepEqual(f.writes, []);
+  f.init("cancelled-preparation"); await drain();
+  assert.equal(activeProcesses.get("cancelled-preparation")?.isAlive(), true);
   assert.equal(getEventListeners(controller.signal, "abort").length, 0);
 });
 

@@ -1,3 +1,4 @@
+import { setImmediate as drain } from "node:timers/promises";
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert";
 import { EventEmitter } from "node:events";
@@ -85,6 +86,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p1"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"run_command"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Finished"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -123,6 +125,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p3"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"custom_analyzer"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Done"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -144,6 +147,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
 
     const secretOutput = "SECRET_TOKEN_XYZ_999";
     mock.stdout.write('{"event":"init","conversation_id":"c-p4"}\n');
+    await drain();
     mock.stdout.write(`{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","output":"${secretOutput}"}}}\n`);
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Safe output"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -169,6 +173,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
 
     const secretParam = "cat /etc/shadow && rm -rf /var";
     mock.stdout.write('{"event":"init","conversation_id":"c-p5"}\n');
+    await drain();
     mock.stdout.write(`{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"${secretParam}"}}}}\n`);
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Safe output"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -198,6 +203,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p6"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"subagent","state":"ACTIVE","subagent_info":{"subagents":[{"role":"Architecture Auditor"}]}}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Subagent finished"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -221,6 +227,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     const secretLogUri = "file:///var/log/private_agent.log";
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p7"}\n');
+    await drain();
     mock.stdout.write(`{"event":"step_update","step_update":{"step_index":1,"step_type":"subagent","state":"ACTIVE","subagent_info":{"subagents":[{"role":"Researcher","initial_prompt":"${secretPrompt}","log_uri":"${secretLogUri}"}]}}}\n`);
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Answer"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -247,6 +254,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
 
     const secretSystem = "INTERNAL_DIAGNOSTIC_RETRY_ALERT";
     mock.stdout.write('{"event":"init","conversation_id":"c-p8"}\n');
+    await drain();
     mock.stdout.write(`{"event":"step_update","step_update":{"step_index":1,"step_type":"system_message","state":"DONE","content":"${secretSystem}"}}\n`);
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Answer"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -271,6 +279,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p9"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Success answer"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -291,6 +300,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p10"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"run_command"}}\n');
     mock.stdout.write('{"event":"result","status":"ERROR","error":"fatal backend crash"}\n');
 
@@ -313,6 +323,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p11"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"run_command"}}\n');
 
     controller.abort();
@@ -334,6 +345,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p12"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
 
     // Child exits unexpectedly before result
@@ -358,6 +370,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     })();
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p13"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"run_command","tool_info":{"name":"run_command"}}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"output":"success"}}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Answer"}}\n');
@@ -382,6 +395,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     })();
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p14"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"run_command"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Answer","usage":{"thinking_tokens":500}}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -400,6 +414,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     const stream = streamSimple(dummyModel, simpleContext, { spawnFn });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p15"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"run_command"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"DONE","tool_name":"run_command"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Pure assistant content"}}\n');
@@ -420,6 +435,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     const stream = streamSimple(dummyModel, simpleContext, { spawnFn });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p16"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Non-interactive ok"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -441,6 +457,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p18"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"DONE","tool_name":"view_file"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"ACTIVE","tool_name":"run_command"}}\n');
@@ -478,6 +495,7 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p19"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"subagent","state":"ACTIVE","subagent_info":{"subagents":[{"role":"Code Reviewer"}]}}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"subagent","state":"DONE"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Review finished"}}\n');
@@ -506,12 +524,15 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p20"}\n');
     // Multiple identical tool ACTIVE updates
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"view_file"}}\n');
     // Tool finishes
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"DONE","tool_name":"view_file"}}\n');
     // Multiple text deltas streaming
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"ACTIVE","text_delta":"chunk 1"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"ACTIVE","text_delta":"chunk 2"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"chunk 3"}}\n');
@@ -540,15 +561,21 @@ describe("progress.test.ts: AGY progress visibility & sanitization", () => {
     });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-p21"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","state":"ACTIVE","text_delta":"First thought: "}}\n');
     assert.strictEqual(progressList[progressList.length - 1], undefined);
 
     // Later tool starts after text has streamed
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"ACTIVE","tool_name":"search_web"}}\n');
     assert.strictEqual(progressList[progressList.length - 1], "AGY: Searching…");
 
+    await drain();
+
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"DONE","tool_name":"search_web"}}\n');
     assert.strictEqual(progressList[progressList.length - 1], "AGY: Searching — done; continuing…");
+
+    await drain();
 
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     await stream.result();

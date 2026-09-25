@@ -1,3 +1,4 @@
+import { setImmediate as drain } from "node:timers/promises";
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert";
 import { EventEmitter } from "node:events";
@@ -58,6 +59,7 @@ function createMockChildProcess(): {
   childEmitter.kill = ((sig?: NodeJS.Signals | number) => {
     isKilled = true;
     signalsReceived.push(String(sig || "SIGTERM"));
+    queueMicrotask(() => childEmitter.emit("exit", 0, sig || "SIGTERM"));
     return true;
   }) as unknown as ChildProcess["kill"];
 
@@ -105,15 +107,19 @@ describe("Compaction Support", () => {
       sessionId: "session-normal",
     });
 
+    await drain();
+
     mock.stdout.write(
       JSON.stringify({ event: "init", conversation_id: "conv-normal-1", session_id: "s1" }) + "\n",
     );
+    await drain();
     mock.stdout.write(
       JSON.stringify({
         event: "step_update",
         step_update: { step_type: "agent_response", text_delta: "Hello" },
       }) + "\n",
     );
+    await drain();
     mock.stdout.write(
       JSON.stringify({ event: "result", status: "SUCCESS", data: { stop_reason: "stop" } }) + "\n",
     );
@@ -141,12 +147,15 @@ describe("Compaction Support", () => {
       sessionId: "session-normal",
     });
 
+    await drain();
+
     mock.stdout.write(
       JSON.stringify({
         event: "step_update",
         step_update: { step_type: "agent_response", text_delta: " World" },
       }) + "\n",
     );
+    await drain();
     mock.stdout.write(
       JSON.stringify({ event: "result", status: "SUCCESS", data: { stop_reason: "stop" } }) + "\n",
     );
@@ -204,7 +213,9 @@ describe("Compaction Support", () => {
     } as unknown as TranscriptContext;
 
     const s1 = streamSimple(dummyModel, ctx1, { spawnFn: fakeSpawn, sessionId: "sess-comp" });
+    await drain();
     mockOld.stdout.write(JSON.stringify({ event: "init", conversation_id: "conv-1" }) + "\n");
+    await drain();
     mockOld.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
     for await (const _ of s1) {}
 
@@ -238,13 +249,16 @@ describe("Compaction Support", () => {
       spawnFn: fakeSpawn,
       sessionId: "sess-comp",
     });
+    await drain();
     mockNew.stdout.write(JSON.stringify({ event: "init", conversation_id: "conv-2" }) + "\n");
+    await drain();
     mockNew.stdout.write(
       JSON.stringify({
         event: "step_update",
         step_update: { step_type: "agent_response", text_delta: "Fresh answer" },
       }) + "\n",
     );
+    await drain();
     mockNew.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
     for await (const _ of s2) {}
 
@@ -334,13 +348,16 @@ describe("Compaction Support", () => {
       spawnFn: fakeSpawn,
       sessionId: "sess-11-12",
     });
+    await drain();
     mock1.stdout.write(JSON.stringify({ event: "init", conversation_id: "conv-new-222" }) + "\n");
+    await drain();
     mock1.stdout.write(
       JSON.stringify({
         event: "step_update",
         step_update: { step_type: "agent_response", text_delta: "Resp 1" },
       }) + "\n",
     );
+    await drain();
     mock1.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
 
     const events1: AssistantMessageEvent[] = [];
@@ -377,12 +394,14 @@ describe("Compaction Support", () => {
       spawnFn: fakeSpawn,
       sessionId: "sess-11-12",
     });
+    await drain();
     mock1.stdout.write(
       JSON.stringify({
         event: "step_update",
         step_update: { step_type: "agent_response", text_delta: "Resp 2" },
       }) + "\n",
     );
+    await drain();
     mock1.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
     for await (const _ of s2) {}
 
@@ -409,7 +428,9 @@ describe("Compaction Support", () => {
       spawnFn: fakeSpawn,
       sessionId: "session-A",
     });
+    await drain();
     mockA.stdout.write(JSON.stringify({ event: "init", conversation_id: "conv-a" }) + "\n");
+    await drain();
     mockA.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
     for await (const _ of sA) {}
 
@@ -418,7 +439,9 @@ describe("Compaction Support", () => {
       spawnFn: fakeSpawn,
       sessionId: "session-B",
     });
+    await drain();
     mockB.stdout.write(JSON.stringify({ event: "init", conversation_id: "conv-b" }) + "\n");
+    await drain();
     mockB.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
     for await (const _ of sB) {}
 
@@ -445,6 +468,7 @@ describe("Compaction Support", () => {
       } as any,
       { spawnFn: fakeSpawn, sessionId: "session-B" },
     );
+    await drain();
     mockB.stdout.write(JSON.stringify({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "B2 reply" } }) + "\n");
     mockB.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
     for await (const _ of sB2) {}
@@ -532,7 +556,10 @@ describe("Compaction Support", () => {
       reasoning: "high",
     });
 
+    await drain();
+
     mock.stdout.write(JSON.stringify({ event: "init", conversation_id: "conv-preservation" }) + "\n");
+    await drain();
     mock.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
     for await (const _ of stream) {}
 
@@ -572,19 +599,24 @@ describe("Compaction Support", () => {
       },
     });
 
+    await drain();
+
     mock.stdout.write(JSON.stringify({ event: "init", conversation_id: "conv-prog" }) + "\n");
+    await drain();
     mock.stdout.write(
       JSON.stringify({
         event: "step_update",
         step_update: { step_type: "tool", state: "ACTIVE", tool_name: "read_file" },
       }) + "\n",
     );
+    await drain();
     mock.stdout.write(
       JSON.stringify({
         event: "step_update",
         step_update: { step_type: "agent_response", text_delta: "Answer" },
       }) + "\n",
     );
+    await drain();
     mock.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
 
     for await (const _ of stream) {}
@@ -604,7 +636,9 @@ describe("Compaction Support", () => {
     } as unknown as TranscriptContext;
 
     const stream = streamSimple(dummyModel, context, { spawnFn: fakeSpawn });
+    await drain();
     mock.stdout.write(JSON.stringify({ event: "init", conversation_id: "c-telemetry" }) + "\n");
+    await drain();
     mock.stdout.write(
       JSON.stringify({
         event: "step_update",
@@ -616,6 +650,7 @@ describe("Compaction Support", () => {
         },
       }) + "\n",
     );
+    await drain();
     mock.stdout.write(
       JSON.stringify({
         event: "step_update",
@@ -626,12 +661,14 @@ describe("Compaction Support", () => {
         },
       }) + "\n",
     );
+    await drain();
     mock.stdout.write(
       JSON.stringify({
         event: "step_update",
         step_update: { step_type: "agent_response", text_delta: "Here is your answer." },
       }) + "\n",
     );
+    await drain();
     mock.stdout.write(JSON.stringify({ event: "result", status: "SUCCESS" }) + "\n");
 
     const events: AssistantMessageEvent[] = [];

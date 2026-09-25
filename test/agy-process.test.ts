@@ -1,3 +1,4 @@
+import { setImmediate as drain } from "node:timers/promises";
 import { describe, it } from "node:test";
 import assert from "node:assert";
 import { EventEmitter } from "node:events";
@@ -33,6 +34,7 @@ function createMockChildProcess(): {
   childEmitter.kill = ((sig?: NodeJS.Signals | number) => {
     isKilled = true;
     signalsReceived.push(String(sig || "SIGTERM"));
+    queueMicrotask(() => childEmitter.emit("exit", 0, sig || "SIGTERM"));
     return true;
   }) as unknown as ChildProcess["kill"];
 
@@ -104,9 +106,10 @@ describe("agy-process.ts: AgyProcess", () => {
 
     // Turn 1
     let turn1Stdin = "";
-    mock.stdin.on("data", (chunk) => {
+    mock.stdin.on("data", async (chunk) => {
       turn1Stdin += chunk.toString();
       // Simulate AGY output for Turn 1 in response to stdin
+      await drain();
       mock.stdout.write('{"event":"step_update","step_update":{"role":"model","text_delta":"Reply 1"}}\n');
       mock.stdout.write('{"event":"result","status":"SUCCESS","data":{"stop_reason":"END_OF_TURN"}}\n');
     });
@@ -127,8 +130,9 @@ describe("agy-process.ts: AgyProcess", () => {
     // Turn 2 on the same running process
     let turn2Stdin = "";
     mock.stdin.removeAllListeners("data");
-    mock.stdin.on("data", (chunk) => {
+    mock.stdin.on("data", async (chunk) => {
       turn2Stdin += chunk.toString();
+      await drain();
       mock.stdout.write('{"event":"step_update","step_update":{"role":"model","text_delta":"Reply 2"}}\n');
       mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     });
@@ -153,17 +157,19 @@ describe("agy-process.ts: AgyProcess", () => {
 
     const executionLog: string[] = [];
 
-    mock.stdin.on("data", (chunk) => {
+    mock.stdin.on("data", async (chunk) => {
       const str = chunk.toString();
       if (str.includes("First queued")) {
         executionLog.push("stdin_first");
-        setTimeout(() => {
+        setTimeout(async () => {
+          await drain();
           mock.stdout.write('{"event":"step_update","step_update":{"text_delta":"First reply"}}\n');
           mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
         }, 10);
       } else if (str.includes("Second queued")) {
         executionLog.push("stdin_second");
-        setTimeout(() => {
+        setTimeout(async () => {
+          await drain();
           mock.stdout.write('{"event":"step_update","step_update":{"text_delta":"Second reply"}}\n');
           mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
         }, 10);
@@ -195,6 +201,8 @@ describe("agy-process.ts: AgyProcess", () => {
     const controller = new AbortController();
     const turnPromise = proc.runTurn("Cancel me", () => {}, controller.signal);
 
+    await drain(); // Native write is confirmed before active cancellation.
+
     // Trigger abort
     controller.abort();
     // Simulate process exiting on SIGINT
@@ -219,6 +227,7 @@ describe("agy-process.ts: AgyProcess", () => {
     await proc.ready;
 
     const turnPromise = proc.runTurn("Fail me", () => {});
+    await drain();
     mock.stdout.write('{"event":"result","status":"ERROR","error":"account quota exhausted"}\n');
 
     await assert.rejects(turnPromise, /account quota exhausted/);
@@ -266,6 +275,7 @@ describe("agy-process.ts: AgyProcess", () => {
     mock.stderr.write("WARN: token approaching limit\n");
 
     // Write valid stdout protocol
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"text_delta":"OK"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
 

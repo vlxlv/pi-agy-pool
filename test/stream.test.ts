@@ -1,3 +1,4 @@
+import { setImmediate as drain } from "node:timers/promises";
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert";
 import fs from "node:fs";
@@ -52,6 +53,7 @@ function createMockChildProcess(): {
   childEmitter.kill = ((sig?: NodeJS.Signals | number) => {
     isKilled = true;
     signalsReceived.push(String(sig || "SIGTERM"));
+    queueMicrotask(() => childEmitter.emit("exit", 0, sig || "SIGTERM"));
     return true;
   }) as unknown as ChildProcess["kill"];
 
@@ -99,15 +101,19 @@ describe("stream.ts: streamSimple", () => {
 
     // Simulate AGY events
     mock.stdout.write('{"event":"init","conversation_id":"conv-test-1"}\n');
+    await drain();
     mock.stdout.write(
       '{"event":"step_update","step_update":{"role":"model","text_delta":"Hel"}}\n',
     );
+    await drain();
     mock.stdout.write(
       '{"event":"step_update","step_update":{"role":"model","text_delta":"lo"}}\n',
     );
+    await drain();
     mock.stdout.write(
       '{"event":"step_update","step_update":{"role":"model","status":"DONE","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"thinking_tokens":2}}}\n',
     );
+    await drain();
     mock.stdout.write(
       '{"event":"result","status":"SUCCESS","data":{"stop_reason":"END_OF_TURN"}}\n',
     );
@@ -156,9 +162,11 @@ describe("stream.ts: streamSimple", () => {
 
     const stream1 = streamSimple(dummyModel, context1, { spawnFn });
     mock.stdout.write('{"event":"init","conversation_id":"c-reuse"}\n');
+    await drain();
     mock.stdout.write(
       '{"event":"step_update","step_update":{"role":"model","text_delta":"Got it."}}\n',
     );
+    await drain();
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
 
     const result1 = await stream1.result();
@@ -178,9 +186,12 @@ describe("stream.ts: streamSimple", () => {
     // Process is reused, NO new spawn!
     assert.strictEqual(spawnCount, 1);
 
+    await drain();
+
     mock.stdout.write(
       '{"event":"step_update","step_update":{"role":"model","text_delta":"Code is 42."}}\n',
     );
+    await drain();
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
 
     const result2 = await stream2.result();
@@ -208,6 +219,7 @@ describe("stream.ts: streamSimple", () => {
 
     const stream1 = streamSimple(dummyModel, context1, { spawnFn });
     mock1.stdout.write('{"event":"init","conversation_id":"c-resumed"}\n');
+    await drain();
     mock1.stdout.write('{"event":"step_update","step_update":{"text_delta":"R1"}}\n');
     mock1.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     const result1 = await stream1.result();
@@ -230,6 +242,7 @@ describe("stream.ts: streamSimple", () => {
     assert.ok(lastSpawnArgs.includes("c-resumed"));
 
     mock2.stdout.write('{"event":"init","conversation_id":"c-resumed"}\n');
+    await drain();
     mock2.stdout.write('{"event":"step_update","step_update":{"text_delta":"R2"}}\n');
     mock2.stdout.write('{"event":"result","status":"SUCCESS"}\n');
 
@@ -252,6 +265,7 @@ describe("stream.ts: streamSimple", () => {
     });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-abort"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"text_delta":"Starting..."}}\n');
 
     const events: AssistantMessageEvent[] = [];
@@ -285,6 +299,7 @@ describe("stream.ts: streamSimple", () => {
 
     const stream = streamSimple(dummyModel, context, { spawnFn });
     mock.stdout.write('{"event":"init","conversation_id":"c-err"}\n');
+    await drain();
     mock.stdout.write('{"event":"result","status":"ERROR","error":"Upstream quota exceeded"}\n');
 
     const events: AssistantMessageEvent[] = [];
@@ -407,6 +422,7 @@ describe("stream.ts: streamSimple", () => {
     } as unknown as TranscriptContext;
     const streamA = streamSimple(dummyModel, contextA, { spawnFn });
     mockA.stdout.write('{"event":"init","conversation_id":"conv-session-A"}\n');
+    await drain();
     mockA.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     const resultA = await streamA.result();
     assert.strictEqual(resultA.responseId, "conv-session-A");
@@ -417,6 +433,7 @@ describe("stream.ts: streamSimple", () => {
     } as unknown as TranscriptContext;
     const streamB = streamSimple(dummyModel, contextB, { spawnFn });
     mockB.stdout.write('{"event":"init","conversation_id":"conv-session-B"}\n');
+    await drain();
     mockB.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     const resultB = await streamB.result();
     assert.strictEqual(resultB.responseId, "conv-session-B");
@@ -435,6 +452,7 @@ describe("stream.ts: streamSimple", () => {
     } as unknown as TranscriptContext;
     const stream = streamSimple(dummyModel, context, { spawnFn });
     mock.stdout.write('{"event":"init","conversation_id":"c-cleanup"}\n');
+    await drain();
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     await stream.result();
 
@@ -457,6 +475,7 @@ describe("stream.ts: streamSimple", () => {
     } as unknown as TranscriptContext;
     const stream = streamSimple(dummyModel, context, { spawnFn });
     mock.stdout.write('{"event":"init","conversation_id":"c-no-retry"}\n');
+    await drain();
     mock.stdout.write('{"event":"result","status":"ERROR","error":"rate limit"}\n');
 
     const result = await stream.result();
@@ -504,6 +523,7 @@ describe("stream.ts: streamSimple", () => {
     } as unknown as TranscriptContext;
     const initStream = streamSimple(dummyModel, initContext, { spawnFn });
     mock.stdout.write('{"event":"init","conversation_id":"c-concurrent"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"text_delta":"Init reply"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     await initStream.result();
@@ -548,22 +568,26 @@ describe("stream.ts: streamSimple", () => {
     const orderOfExecution: string[] = [];
 
     // Track stdin writes to simulate server responses
-    mock.stdin.on("data", (chunk) => {
+    mock.stdin.on("data", async (chunk) => {
       const str = chunk.toString();
       if (str.includes("Turn 1 question")) {
         orderOfExecution.push("turn1_stdin");
-        setTimeout(() => {
+        setTimeout(async () => {
+          await drain();
           mock.stdout.write(
             '{"event":"step_update","step_update":{"text_delta":"Turn 1 reply"}}\n',
           );
+          await drain();
           mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
         }, 10);
       } else if (str.includes("Turn 2 question")) {
         orderOfExecution.push("turn2_stdin");
-        setTimeout(() => {
+        setTimeout(async () => {
+          await drain();
           mock.stdout.write(
             '{"event":"step_update","step_update":{"text_delta":"Turn 2 reply"}}\n',
           );
+          await drain();
           mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
         }, 10);
       }
@@ -587,7 +611,7 @@ describe("stream.ts: streamSimple", () => {
     assert.strictEqual(res2.content[0].type === "text" && res2.content[0].text, "Turn 2 reply");
   });
 
-  it("shutdown signals: cleans up active children on SIGINT and SIGTERM without listener leaks", () => {
+  it("shutdown signals: cleans up active children on SIGINT and SIGTERM without listener leaks", async () => {
     unregisterShutdownHooksForTesting();
 
     const sigintListenersBefore = process.listenerCount("SIGINT");
@@ -653,8 +677,10 @@ describe("stream.ts: streamSimple", () => {
 
     mock.stdout.write('{"event":"init","conversation_id":"c-usage-fallback"}\n');
     // step_update has NO usage
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"text_delta":"Answer"}}\n');
     // result has usage in result.result.usage
+    await drain();
     mock.stdout.write(
       '{"event":"result","status":"SUCCESS","result":{"usage":{"input_tokens":120,"output_tokens":45,"total_tokens":165,"thinking_tokens":10}}}\n',
     );
@@ -690,6 +716,7 @@ describe("stream.ts: streamSimple", () => {
     } as unknown as TranscriptContext;
     const stream1 = streamSimple(dummyModel, context1, { spawnFn });
     mock1.stdout.write('{"event":"init","conversation_id":"c-switch-model"}\n');
+    await drain();
     mock1.stdout.write('{"event":"step_update","step_update":{"text_delta":"Reply 1"}}\n');
     mock1.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     const result1 = await stream1.result();
@@ -723,6 +750,7 @@ describe("stream.ts: streamSimple", () => {
     assert.ok(lastSpawnArgsList[1].includes("c-switch-model"));
 
     mock2.stdout.write('{"event":"init","conversation_id":"c-switch-model"}\n');
+    await drain();
     mock2.stdout.write('{"event":"step_update","step_update":{"text_delta":"Reply 2"}}\n');
     mock2.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     const result2 = await stream2.result();
@@ -748,6 +776,7 @@ describe("stream.ts: streamSimple", () => {
     } as unknown as TranscriptContext;
     const stream1 = streamSimple(dummyModel, context1, { spawnFn, reasoning: "low" });
     mock1.stdout.write('{"event":"init","conversation_id":"c-switch-effort"}\n');
+    await drain();
     mock1.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     const result1 = await stream1.result();
 
@@ -774,12 +803,13 @@ describe("stream.ts: streamSimple", () => {
     assert.ok(lastSpawnArgsList[1].includes("c-switch-effort"));
 
     mock2.stdout.write('{"event":"init","conversation_id":"c-switch-effort"}\n');
+    await drain();
     mock2.stdout.write('{"event":"result","status":"SUCCESS"}\n');
     const result2 = await stream2.result();
     assert.strictEqual(result2.responseId, "c-switch-effort");
   });
 
-  it("handleSignal cleans up children without calling process.exit when no exitFn provided", () => {
+  it("handleSignal cleans up children without calling process.exit when no exitFn provided", async () => {
     const mock = createMockChildProcess();
     const spawnFn = (() => mock.child) as unknown as typeof import("node:child_process").spawn;
     const context = {

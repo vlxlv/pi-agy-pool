@@ -1,3 +1,4 @@
+import { setImmediate as drain } from "node:timers/promises";
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert";
 import { EventEmitter } from "node:events";
@@ -37,6 +38,7 @@ function createMockChildProcess(): {
   });
   childEmitter.kill = (() => {
     isKilled = true;
+    queueMicrotask(() => childEmitter.emit("exit", 0, "SIGTERM"));
     return true;
   }) as unknown as ChildProcess["kill"];
 
@@ -78,6 +80,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     const stream = streamSimple(dummyModel, simpleContext, { spawnFn });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t1"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","state":"ACTIVE","text_delta":"Part 1. "}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"ACTIVE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"cmd":"ls"}}}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"output":"file1.txt\\nfile2.txt"}}}\n');
@@ -97,6 +100,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     const stream = streamSimple(dummyModel, simpleContext, { spawnFn });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t2"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","state":"ACTIVE","text_delta":"Delegating task. "}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"subagent","state":"DONE","tool_name":"invoke_subagent","subagent_info":{"subagents":[{"conversation_id":"sub-1"}]}}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":3,"step_type":"system_message","state":"DONE","duration_seconds":0.01}}\n');
@@ -114,6 +118,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     const stream = streamSimple(dummyModel, simpleContext, { spawnFn });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t3"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","state":"ACTIVE","text_delta":"Alpha "}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"ACTIVE","text_delta":"Beta "}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":3,"step_type":"agent_response","state":"DONE","text_delta":"Gamma"}}\n');
@@ -130,6 +135,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     const stream = streamSimple(dummyModel, simpleContext, { spawnFn });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t4"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"read_file"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"DONE","tool_name":"read_file"}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Only answer text"}}\n');
@@ -146,6 +152,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     const stream = streamSimple(dummyModel, simpleContext, { spawnFn });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t5"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","output":"TOP_SECRET_CREDENTIAL_DATA"}}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Clean summary without secrets"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -163,6 +170,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     const stream = streamSimple(dummyModel, simpleContext, { spawnFn });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t6"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"subagent","state":"DONE","subagent_info":{"subagents":[{"initial_prompt":"SUBAGENT_INTERNAL_PROMPT","log_uri":"file:///logs/sub.log"}]}}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Final synthesized answer"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -190,9 +198,11 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     })();
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t7"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","state":"ACTIVE","text_delta":"Streamed "}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","state":"DONE","text_delta":"answer"}}\n');
     // result.response carries identical cumulative text
+    await drain();
     mock.stdout.write('{"event":"result","status":"SUCCESS","result":{"response":"Streamed answer"}}\n');
 
     await consume;
@@ -208,6 +218,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     const stream = streamSimple(dummyModel, simpleContext, { spawnFn });
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t8"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","state":"DONE","text_delta":"Hi","usage":{"input_tokens":100,"output_tokens":50,"thinking_tokens":35,"total_tokens":150}}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS","result":{"usage":{"input_tokens":100,"output_tokens":50,"thinking_tokens":35,"total_tokens":150}}}\n');
 
@@ -232,6 +243,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     })();
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t9"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"whoami"}}}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"output":"codex"}}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"User is codex"}}\n');
@@ -258,6 +270,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     })();
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t10"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","state":"DONE","text_delta":"42","usage":{"thinking_tokens":400}}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
 
@@ -276,6 +289,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t11"}\n');
     // Unknown future step type
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"telemetry_heartbeat","state":"DONE","custom_payload":{"foo":"bar"}}}\n');
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","state":"DONE","text_delta":"Still working"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
@@ -301,6 +315,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     })();
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t12"}\n');
+    await drain();
     mock.stdout.write('{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","state":"DONE","text_delta":"Done test"}}\n');
     mock.stdout.write('{"event":"result","status":"SUCCESS"}\n');
 
@@ -326,6 +341,7 @@ describe("telemetry.test.ts: AGY structured agent telemetry", () => {
     })();
 
     mock.stdout.write('{"event":"init","conversation_id":"c-t13"}\n');
+    await drain();
     mock.stdout.write('{"event":"result","status":"ERROR","error":"upstream service unavailable"}\n');
 
     await consume;

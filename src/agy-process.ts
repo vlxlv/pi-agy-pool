@@ -26,7 +26,7 @@ interface Turn {
   resolve: (result: AgyResultEvent) => void;
   reject: (error: Error) => void;
   cleanup: () => void;
-  started: boolean;
+  phase: "queued" | "preparing" | "writing" | "submitted";
 }
 
 /**
@@ -205,9 +205,11 @@ export class AgyProcess extends EventEmitter {
       this.readyResolve(this.init);
       this.emit("init", this.init);
     }
+    // Ignore unsolicited/stale turn telemetry until write confirmation. Init is
+    // process metadata and remains observable independently of turn submission.
     // Capture the head once: callbacks/results may enqueue more work.
     const turn = this.turns[0];
-    if (turn?.started) {
+    if (turn && (event.event === "init" || turn.phase === "submitted")) {
       try {
         turn.onEvent(event);
       } catch (error) {
@@ -232,16 +234,16 @@ export class AgyProcess extends EventEmitter {
     this.emit("event", event);
   }
 
-  /** The array is the FIFO authority; only its started head can write/settle. */
+  /** The array owns FIFO preparation; only a write-confirmed head owns results. */
   runTurn(prompt: string | Promise<string>, onEvent: (event: AgyEvent) => void, signal?: AbortSignal): Promise<AgyResultEvent> {
     // A queued payload may reject before reaching the head.
     if (typeof prompt !== "string") void prompt.catch(() => {});
     if (signal?.aborted) return Promise.reject(new Error("Request was aborted"));
     if (!this.isAlive()) return Promise.reject(this.failure || new Error("AGY process is not alive"));
     return new Promise((resolve, reject) => {
-      const turn: Turn = { prompt, onEvent, resolve, reject, cleanup: () => signal?.removeEventListener("abort", cancel), started: false };
+      const turn: Turn = { prompt, onEvent, resolve, reject, cleanup: () => signal?.removeEventListener("abort", cancel), phase: "queued" };
       const cancel = () => {
-        if (this.turns[0] === turn && turn.started) {
+        if (this.turns[0] === turn && (turn.phase === "writing" || turn.phase === "submitted")) {
           void this.abort();
         } else {
           const index = this.turns.indexOf(turn);
@@ -249,6 +251,7 @@ export class AgyProcess extends EventEmitter {
           this.turns.splice(index, 1);
           turn.cleanup();
           reject(new Error("Request was aborted"));
+          this.startHead();
         }
       };
       signal?.addEventListener("abort", cancel, { once: true });
@@ -259,22 +262,40 @@ export class AgyProcess extends EventEmitter {
 
   private startHead(): void {
     const turn = this.turns[0];
-    if (!turn || turn.started || !this.isAlive()) return;
-    turn.started = true;
+    if (!turn || turn.phase !== "queued" || !this.isAlive()) return;
+    turn.phase = "preparing";
     void Promise.all([this.ready, turn.prompt]).then(([, prompt]) => {
       if (this.turns[0] !== turn || !this.isAlive()) return;
       const stdin = this.child.stdin;
-      if (!stdin || stdin.destroyed || !stdin.writable) throw new Error("AGY process stdin is not writable");
-      stdin.write(JSON.stringify({ event: "user", message: { content: prompt } }) + "\n", error => {
+      if (!stdin || stdin.destroyed || !stdin.writable) {
+        this.invalidate(new Error("AGY process stdin is not writable"));
+        void this.terminate("SIGINT");
+        return;
+      }
+      const message = JSON.stringify({ event: "user", message: { content: prompt } }) + "\n";
+      // After write() is invoked, bytes cannot safely be recalled. Cancellation
+      // must interrupt this child even while its write callback is outstanding.
+      turn.phase = "writing";
+      stdin.write(message, error => {
         if (error) {
           this.invalidate(error);
           void this.terminate("SIGINT");
+        } else if (this.turns[0] === turn && this.isAlive()) {
+          turn.phase = "submitted";
         }
       });
     }).catch(error => {
       if (this.turns[0] !== turn) return;
-      this.invalidate(error instanceof Error ? error : new Error(String(error)));
-      void this.terminate("SIGINT");
+      const failure = error instanceof Error ? error : new Error(String(error));
+      if (turn.phase === "preparing") {
+        this.turns.shift();
+        turn.cleanup();
+        turn.reject(failure);
+        this.startHead();
+      } else {
+        this.invalidate(failure);
+        void this.terminate("SIGINT");
+      }
     });
   }
 

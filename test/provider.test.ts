@@ -1,3 +1,4 @@
+import { setImmediate as drain } from "node:timers/promises";
 import { describe, it } from "node:test";
 import assert from "node:assert";
 import path from "node:path";
@@ -94,6 +95,7 @@ describe("provider.ts: Pi real provider integration", () => {
       childEmitter.killed = false;
       childEmitter.kill = () => {
         childEmitter.killed = true;
+        queueMicrotask(() => childEmitter.emit("exit", 0, "SIGTERM"));
         return true;
       };
 
@@ -119,6 +121,7 @@ describe("provider.ts: Pi real provider integration", () => {
       );
 
       childEmitter.stdout.write('{"event":"init","conversation_id":"c-no-http"}\n');
+      await drain();
       childEmitter.stdout.write('{"event":"step_update","step_update":{"text_delta":"OK"}}\n');
       childEmitter.stdout.write('{"event":"result","status":"SUCCESS"}\n');
 
@@ -280,6 +283,7 @@ describe("provider.ts: Pi real provider integration", () => {
       childEmitter.killed = false;
       childEmitter.kill = () => {
         childEmitter.killed = true;
+        queueMicrotask(() => childEmitter.emit("exit", 0, "SIGTERM"));
         return true;
       };
 
@@ -295,6 +299,7 @@ describe("provider.ts: Pi real provider integration", () => {
       );
 
       childEmitter.stdout.write('{"event":"init","conversation_id":"c-test"}\n');
+      await drain();
       childEmitter.stdout.write('{"event":"result","status":"SUCCESS"}\n');
       await stream.result();
 
