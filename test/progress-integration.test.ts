@@ -300,3 +300,61 @@ for (const terminal of ["success", "error", "exit", "abort"]) {
     assert.equal(ui.footerStatus().get("ponytail"), "ponytail: full");
   });
 }
+
+test("Pi 0.87.1 retains activity across loader recreation and restores its own default", async t => {
+  const h = await createHarness();
+  const ui = await attachTui(h);
+  t.after(() => ui.close());
+  const reply = h.session.prompt("Controlled working-message lifecycle");
+  await until(() => h.children.length === 1, "spawn");
+  const child = h.children[0];
+  assert.equal(ui.status(), undefined, "request start leaves the default to Pi");
+  child.send({ event: "init", conversation_id: "working-lifecycle" });
+  await until(() => child.turns === 1, "submitted");
+  assert.equal(ui.status(), undefined, "init does not customize generic work");
+  const rendered = () => stripVTControlCharacters(ui.mode.activeStatusIndicator.renderInBorder(110));
+  assert(rendered().includes(ui.mode.defaultWorkingMessage));
+
+  child.step({ step_type: "tool", step_index: 1, state: "ACTIVE", tool_name: "read_file" });
+  const firstLoader = ui.mode.activeStatusIndicator;
+  // Exercise actual host recreation; production calls only the public message API.
+  ui.mode.clearStatusIndicator("working");
+  ui.mode.showWorkingStatusIndicator();
+  assert.notEqual(ui.mode.activeStatusIndicator, firstLoader);
+  assert(rendered().includes("Reading file…"));
+  const before = ui.terminal.writes.length;
+  child.step({ step_type: "tool", step_index: 1, state: "DONE" });
+  await until(() => ui.terminal.writes.slice(before).some(frame =>
+    stripVTControlCharacters(frame).includes("Reading file — done; continuing…")), "retained completion renders");
+
+  for (const step of [
+    { step_type: "tool", step_index: 2, state: "ACTIVE", tool_name: "/private/SECRET_COMMAND" },
+    { step_type: "subagent", step_index: 3, state: "ACTIVE", subagent_info: { subagents: [{ role: "SECRET_PROMPT" }] } },
+  ]) {
+    child.step({ step_type: "tool", step_index: 4, state: "ACTIVE", tool_name: "run_command" });
+    assert.equal(ui.status(), "Running command…");
+    child.step(step);
+    assert.equal(ui.status(), undefined, "unknown activity restores Pi default");
+    assert(rendered().includes(ui.mode.defaultWorkingMessage));
+  }
+  assert(!ui.workingWrites.some(value => /AGY|agy-pool|SECRET|private/.test(value ?? "")));
+  child.step({ step_type: "subagent", step_index: 5, state: "ACTIVE", subagent_info: { subagents: [{ role: "Research" }] } });
+  assert.equal(ui.status(), "Research subagent…");
+  child.step({ step_type: "agent_response", text_delta: "Finished." });
+  assert.equal(ui.status(), undefined);
+  assert(rendered().includes(ui.mode.defaultWorkingMessage));
+  child.result();
+  await reply;
+  assert.equal(ui.status(), undefined);
+  assert.deepEqual(ui.statusWrites, [["agy-pool", undefined]]);
+  assert.equal(ui.footerStatus().get("ponytail"), "ponytail: full");
+
+  // Host extension reset also removes any saved message before another loader exists.
+  const publicUI = ui.mode.createExtensionUIContext();
+  publicUI.setWorkingMessage("Reading file…");
+  ui.mode.resetExtensionUI();
+  assert.equal(ui.status(), undefined);
+  ui.mode.showWorkingStatusIndicator();
+  assert(rendered().includes(ui.mode.defaultWorkingMessage));
+  assert(!rendered().includes("Reading file"));
+});
